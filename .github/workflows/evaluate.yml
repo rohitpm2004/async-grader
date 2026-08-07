@@ -34,6 +34,7 @@ jobs:
         env:
           WEBHOOK_URL: ${{ github.event.client_payload.webhookUrl }}
           JOB_ID: ${{ github.event.client_payload.jobId }}
+          WEBHOOK_SECRET: ${{ github.event.client_payload.webhookSecret }}
         run: |
           # Read the test output
           TEST_OUTPUT=$(cat student-repo/test_results.txt || echo "No test output found")
@@ -41,6 +42,7 @@ jobs:
           # Send a POST request back to our central-evaluators backend
           curl -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
             -d '{
               "jobId": "'"$JOB_ID"'",
               "status": "completed",
