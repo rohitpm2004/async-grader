@@ -1,0 +1,48 @@
+name: Evaluator Workflow
+
+on:
+  repository_dispatch:
+    types: [run-evaluation]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Student Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repoUrl }}
+          path: student-repo
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Dependencies
+        working-directory: ./student-repo
+        run: npm install
+
+      - name: Run Tests
+        working-directory: ./student-repo
+        id: tests
+        # We use continue-on-error so the workflow doesn't completely crash if tests fail
+        continue-on-error: true
+        run: npm test > test_results.txt 2>&1
+
+      - name: Send Results Back to Webhook
+        env:
+          WEBHOOK_URL: ${{ github.event.client_payload.webhookUrl }}
+          JOB_ID: ${{ github.event.client_payload.jobId }}
+        run: |
+          # Read the test output
+          TEST_OUTPUT=$(cat student-repo/test_results.txt || echo "No test output found")
+          
+          # Send a POST request back to our central-evaluators backend
+          curl -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "jobId": "'"$JOB_ID"'",
+              "status": "completed",
+              "testOutput": '"$(echo "$TEST_OUTPUT" | jq -aRs .)"'
+            }'
