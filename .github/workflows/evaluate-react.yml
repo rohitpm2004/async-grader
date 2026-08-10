@@ -1,0 +1,67 @@
+name: React Evaluator Workflow
+
+on:
+  repository_dispatch:
+    types: [run-react-evaluation]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Grader Code
+        uses: actions/checkout@v4
+        with:
+          path: grader-repo
+
+      - name: Checkout Student Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repoUrl }}
+          path: student-repo
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Playwright & Dependencies (Grader)
+        working-directory: ./grader-repo
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Install Dependencies & Build (Student)
+        working-directory: ./student-repo
+        run: |
+          npm install
+          npm run build
+
+      - name: Serve Student App
+        working-directory: ./student-repo
+        run: |
+          npx serve -s dist -l 3000 &
+          sleep 3 # give the server time to start
+
+      - name: Run Playwright Tests
+        working-directory: ./grader-repo
+        id: tests
+        continue-on-error: true
+        run: node react-runner.js > test_results.json 2>&1
+
+      - name: Send Results Back to Webhook
+        env:
+          WEBHOOK_URL: ${{ github.event.client_payload.webhookUrl }}
+          JOB_ID: ${{ github.event.client_payload.jobId }}
+          WEBHOOK_SECRET: ${{ github.event.client_payload.webhookSecret }}
+        run: |
+          TEST_OUTPUT=$(cat grader-repo/test_results.json || echo '{"error": "No output"}')
+          
+          curl -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
+            -d '{
+              "jobId": "'"$JOB_ID"'",
+              "status": "completed",
+              "testOutput": '"$(echo "$TEST_OUTPUT" | jq -aRs .)"'
+            }'
