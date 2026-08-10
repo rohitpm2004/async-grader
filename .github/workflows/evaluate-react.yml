@@ -50,6 +50,7 @@ jobs:
         run: node react-runner.js > test_results.json 2>&1
 
       - name: Send Results Back to Webhook
+        if: always()
         env:
           WEBHOOK_URL: ${{ github.event.client_payload.webhookUrl }}
           JOB_ID: ${{ github.event.client_payload.jobId }}
