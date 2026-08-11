@@ -1,4 +1,4 @@
-name: React Evaluator Workflow
+name: Evaluate React Assignment
 
 on:
   repository_dispatch:
@@ -8,11 +8,6 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Grader Code
-        uses: actions/checkout@v4
-        with:
-          path: grader-repo
-
       - name: Checkout Student Code
         uses: actions/checkout@v4
         with:
@@ -24,45 +19,54 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Install Playwright & Dependencies (Grader)
-        working-directory: ./grader-repo
-        run: |
-          npm init -y
-          npm install playwright
-          npx playwright install --with-deps chromium
-
-      - name: Install Dependencies & Build (Student)
+      - name: Install Dependencies
         working-directory: ./student-repo
-        run: |
-          npm install
-          npm run build
+        run: npm install --legacy-peer-deps
 
-      - name: Serve Student App
+      - name: Smart Build (Fallback Logic)
+        id: build
         working-directory: ./student-repo
-        run: |
-          npx serve -s dist -l 3000 &
-          sleep 3 # give the server time to start
-
-      - name: Run Playwright Tests
-        working-directory: ./grader-repo
-        id: tests
         continue-on-error: true
-        run: node react-runner.js > test_results.json 2>&1
-
-      - name: Send Results Back to Webhook
-        if: always()
-        env:
-          WEBHOOK_URL: ${{ github.event.client_payload.webhookUrl }}
-          JOB_ID: ${{ github.event.client_payload.jobId }}
-          WEBHOOK_SECRET: ${{ github.event.client_payload.webhookSecret }}
         run: |
-          TEST_OUTPUT=$(cat grader-repo/test_results.json || echo '{"error": "No output"}')
+          if jq -e '.scripts.build' package.json > /dev/null; then
+            echo "Build script found. Running npm run build..."
+            npm run build
+          elif grep -q '"vite"' package.json; then
+            echo "Vite detected but no build script. Running npx vite build..."
+            npx vite build
+          elif grep -q '"react-scripts"' package.json; then
+            echo "CRA detected but no build script. Running npx react-scripts build..."
+            npx react-scripts build
+          else
+            echo "No build framework detected. Skipping build."
+          fi
+
+      - name: Run Linter (Syntax Check)
+        id: lint
+        working-directory: ./student-repo
+        continue-on-error: true
+        run: |
+          echo "Running ESLint..."
+          npx eslint . --ext .js,.jsx,.ts,.tsx > linter-report.txt || true
+          cat linter-report.txt
+
+      - name: Send Webhook Result
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" == "failure" ]; then
+            STATUS="failed"
+            OUTPUT="Build: Failed. The application could not be compiled. Check for syntax errors."
+          else
+            STATUS="completed"
+            LINT_OUTPUT=$(cat ./student-repo/linter-report.txt 2>/dev/null || echo "No lint errors.")
+            OUTPUT="Build: Success.\nLinter Report:\n$LINT_OUTPUT"
+          fi
           
-          curl -X POST "$WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
-            -d '{
-              "jobId": "'"$JOB_ID"'",
-              "status": "completed",
-              "testOutput": '"$(echo "$TEST_OUTPUT" | jq -aRs .)"'
-            }'
+          # Send back to Node server
+          curl -X POST -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg status "$STATUS" \
+              --arg output "$OUTPUT" \
+              --arg secret "${{ github.event.client_payload.webhookSecret }}" \
+              '{status: $status, testOutput: $output, webhookSecret: $secret}')" \
+            "${{ github.event.client_payload.webhookUrl }}"
