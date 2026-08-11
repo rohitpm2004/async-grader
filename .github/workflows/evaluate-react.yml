@@ -63,10 +63,12 @@ jobs:
           fi
           
           # Send back to Node server
-          curl -X POST -H "Content-Type: application/json" \
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
             -d "$(jq -n \
               --arg status "$STATUS" \
               --arg output "$OUTPUT" \
-              --arg secret "${{ github.event.client_payload.webhookSecret }}" \
-              '{status: $status, testOutput: $output, webhookSecret: $secret}')" \
+              --arg jobId "${{ github.event.client_payload.jobId }}" \
+              '{jobId: $jobId, status: $status, testOutput: $output}')" \
             "${{ github.event.client_payload.webhookUrl }}"
