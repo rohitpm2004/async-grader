@@ -105,15 +105,15 @@ jobs:
           PASSED=$(jq -r '.passed' result.json || echo false)
           FEEDBACK=$(jq -r '.feedback' result.json || echo "Unknown error")
           
+          PAYLOAD=$(jq -n \
+            --arg jobId "${{ github.event.client_payload.jobId }}" \
+            --arg status "completed" \
+            --argjson passed "$PASSED" \
+            --argjson score "$SCORE" \
+            --arg feedback "$FEEDBACK" \
+            '{jobId: $jobId, status: $status, evaluation: {passed: $passed, score: $score, feedback: $feedback}}')
+          
           curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
-            -d "{
-              \"jobId\": \"${{ github.event.client_payload.jobId }}\",
-              \"status\": \"completed\",
-              \"evaluation\": {
-                \"passed\": $PASSED,
-                \"score\": $SCORE,
-                \"feedback\": \"$FEEDBACK\"
-              }
-            }"
+            -d "$PAYLOAD"
