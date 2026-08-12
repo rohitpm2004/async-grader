@@ -18,34 +18,169 @@ jobs:
       
       - name: Install Dependencies
         run: |
-          npm install
-          npx playwright install --with-deps
+          npm init -y
+          npm install playwright openai
+          npx playwright install --with-deps chromium
 
       - name: Clone Student Repository
-        run: git clone ${{ github.event.client_payload.repoUrl }} student-submission
+        run: |
+          REPO_URL="${{ github.event.client_payload.repoUrl }}"
+          if [[ "$REPO_URL" == *"/blob/"* || "$REPO_URL" == *".html" ]]; then
+            # Not supported for visual - visual needs full folder
+            mkdir -p student-submission
+            RAW_URL=$(echo "$REPO_URL" | sed 's|/blob/|/raw/|')
+            curl -sL "$RAW_URL" -o student-submission/index.html
+          else
+            git clone "$REPO_URL" student-submission
+          fi
 
       - name: Run Visual Evaluation
         id: run-eval
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }} # Needed for GPT-4o vision
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
-          # Replace this with your actual Playwright/Vision grading logic
+          cat << 'EOF' > run-eval.js
+          const { chromium } = require('playwright');
+          const http = require('http');
+          const fs = require('fs');
+          const path = require('path');
+          const { OpenAI } = require('openai');
+
+          const payload = JSON.parse(process.env.PAYLOAD);
+          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+          const DIR = path.join(process.cwd(), 'student-submission');
+
+          // 1. Simple Static Server
+          const server = http.createServer((req, res) => {
+            let filePath = path.join(DIR, req.url === '/' ? 'index.html' : req.url);
+            if (!fs.existsSync(filePath)) {
+              res.writeHead(404);
+              res.end();
+              return;
+            }
+            const ext = path.extname(filePath);
+            const mime = ext === '.html' ? 'text/html' :
+                         ext === '.css' ? 'text/css' :
+                         ext === '.js' ? 'application/javascript' : 'text/plain';
+            res.writeHead(200, { 'Content-Type': mime });
+            res.end(fs.readFileSync(filePath));
+          });
+
+          async function evaluate() {
+            server.listen(3000);
+            
+            let screenshotBase64 = '';
+            let codeContext = '';
+            
+            try {
+              // Extract Code
+              const files = ['index.html', 'style.css', 'script.js', 'app.js', 'styles.css'];
+              for (const file of files) {
+                const fp = path.join(DIR, file);
+                if (fs.existsSync(fp)) {
+                  codeContext += `\n--- ${file} ---\n${fs.readFileSync(fp, 'utf8').slice(0, 1500)}\n`;
+                }
+              }
+
+              // Take Screenshot
+              const browser = await chromium.launch();
+              const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+              const page = await context.newPage();
+              await page.goto('http://localhost:3000', { waitUntil: 'networkidle', timeout: 15000 });
+              
+              const buffer = await page.screenshot({ fullPage: true });
+              screenshotBase64 = buffer.toString('base64');
+              
+              await browser.close();
+
+              // OpenAI Grading
+              const prompt = `
+You are an expert web development instructor grading a student's HTML/CSS/JS assignment.
+
+## Rubric:
+${payload.rubricText || 'Grade the design and functionality.'}
+
+## Student's Code (truncated):
+${codeContext}
+
+Please carefully analyze the attached screenshot of their rendered website alongside their source code.
+Determine how well they met the rubric requirements.
+
+Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
+{
+  "score": <number 0-100>,
+  "summary": "1-2 sentences summarizing their attempt.",
+  "strengths": ["1 thing they did well"],
+  "issues": ["1-2 things that need fixing based on the rubric"]
+}
+              `.trim();
+
+              const response = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      { type: "text", text: prompt },
+                      { type: "image_url", image_url: { url: `data:image/png;base64,${screenshotBase64}` } }
+                    ]
+                  }
+                ],
+                max_tokens: 300,
+                temperature: 0.2,
+                response_format: { type: "json_object" }
+              });
+
+              const resultStr = response.choices[0].message.content.trim();
+              const resultObj = JSON.parse(resultStr);
+              
+              // Map output format to what central-evaluators expects
+              fs.writeFileSync('result.json', JSON.stringify({
+                score: resultObj.score,
+                feedback: JSON.stringify({
+                  summary: resultObj.summary,
+                  strengths: resultObj.strengths || [],
+                  issues: resultObj.issues || []
+                })
+              }));
+
+            } catch (err) {
+              console.error(err);
+              fs.writeFileSync('result.json', JSON.stringify({
+                score: 0,
+                feedback: JSON.stringify({
+                  summary: "Evaluation script encountered an error.",
+                  strengths: [],
+                  issues: [err.message]
+                })
+              }));
+            } finally {
+              server.close();
+              process.exit(0);
+            }
+          }
+
+          evaluate();
+          EOF
           
-          echo "score=100" >> $GITHUB_OUTPUT
+          node run-eval.js
 
       - name: Send Webhook Callback
         if: always()
         run: |
+          SCORE=$(jq -r '.score' result.json || echo 0)
+          FEEDBACK=$(jq -r '.feedback' result.json || echo "Unknown error")
+          
+          PAYLOAD=$(jq -n \
+            --arg jobId "${{ github.event.client_payload.jobId }}" \
+            --arg status "completed" \
+            --argjson score "$SCORE" \
+            --arg feedback "$FEEDBACK" \
+            '{jobId: $jobId, status: $status, result: {score: $score, feedback: $feedback}}')
+          
           curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
-            -d '{
-              "jobId": "${{ github.event.client_payload.jobId }}",
-              "status": "completed",
-              "result": [
-                {
-                  "score": 100,
-                  "feedback": "Visual match successful"
-                }
-              ]
-            }'
+            -d "$PAYLOAD"
