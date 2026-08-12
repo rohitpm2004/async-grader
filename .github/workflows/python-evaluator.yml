@@ -8,38 +8,136 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Grader Repository
-        uses: actions/checkout@v3
+      - name: Checkout Student Repository
+        run: |
+          REPO_URL="${{ github.event.client_payload.repoUrl }}"
+          git clone "$REPO_URL" student-submission
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
 
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Clone Student Repository
-        run: git clone ${{ github.event.client_payload.repoUrl }} student-submission
-
       - name: Run Python Evaluation
-        id: run-eval
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
-          # Replace this with your actual Python grading logic
-          # E.g., python evaluate.py ./student-submission
+          cat << 'EOF' > run-eval.js
+          const fs = require('fs');
+          const path = require('path');
+          const { spawnSync } = require('child_process');
           
-          echo "score=100" >> $GITHUB_OUTPUT
+          const payload = JSON.parse(process.env.PAYLOAD);
+          const dir = path.join(process.cwd(), 'student-submission');
+          
+          // 1. Find the python file (assume the first .py file found)
+          let pyFile = null;
+          function findPy(currentDir, depth = 0) {
+            if (depth > 2 || pyFile) return;
+            const files = fs.readdirSync(currentDir);
+            for (const name of files) {
+              if (name === 'venv' || name === '.git') continue;
+              const fp = path.join(currentDir, name);
+              if (fs.statSync(fp).isFile() && name.endsWith('.py') && !name.startsWith('test_')) {
+                pyFile = fp;
+                return;
+              } else if (fs.statSync(fp).isDirectory()) {
+                findPy(fp, depth + 1);
+              }
+            }
+          }
+          findPy(dir);
+          
+          const extra = payload.extraPayload || {};
+          const testCases = extra.testCases || [];
+          const evaluationMode = extra.evaluationMode || 'script';
+          const entryFunction = extra.entryFunction;
+          const expectedLogs = extra.expectedLogs || [];
+          
+          let results = [];
+          
+          if (!pyFile) {
+            results.push({ passed: false, error: "No .py file found in the repository" });
+          } else {
+             const pyFileName = path.basename(pyFile);
+             const pyDir = path.dirname(pyFile);
+             
+             if (evaluationMode === 'function') {
+                for (const tc of testCases) {
+                   const wrapper = 
+                   "import sys, json, traceback\n" +
+                   "sys.path.append('.')\n" +
+                   "try:\n" +
+                   "    from " + pyFileName.replace('.py', '') + " import " + entryFunction + "\n" +
+                   "    inputs = json.loads(sys.argv[1])\n" +
+                   "    if isinstance(inputs, list):\n" +
+                   "        res = " + entryFunction + "(*inputs)\n" +
+                   "    else:\n" +
+                   "        res = " + entryFunction + "(inputs)\n" +
+                   "    print(json.dumps({'success': True, 'output': res}))\n" +
+                   "except Exception as e:\n" +
+                   "    print(json.dumps({'success': False, 'error': str(e), 'trace': traceback.format_exc()}))\n";
 
-      - name: Send Webhook Callback
-        if: always()
-        run: |
-          curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
-            -H "Content-Type: application/json" \
-            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
-            -d '{
-              "jobId": "${{ github.event.client_payload.jobId }}",
-              "status": "completed",
-              "results": [
-                {
-                  "score": 100,
-                  "feedback": "Evaluation completed"
+                   fs.writeFileSync(path.join(pyDir, 'test_wrapper.py'), wrapper);
+                   const argsStr = JSON.stringify(Array.isArray(tc.input) ? tc.input : [tc.input]);
+                   const run = spawnSync('python', ['test_wrapper.py', argsStr], { cwd: pyDir, encoding: 'utf-8', timeout: 5000 });
+                   
+                   try {
+                     const out = JSON.parse(run.stdout.trim());
+                     if (out.success) {
+                        const passed = JSON.stringify(out.output) === JSON.stringify(tc.expected);
+                        results.push({ passed, actual: out.output, expected: tc.expected });
+                     } else {
+                        results.push({ passed: false, error: out.error, actual: out.error, expected: tc.expected });
+                     }
+                   } catch(e) {
+                     results.push({ passed: false, error: run.stderr || run.stdout || "Crashed", expected: tc.expected });
+                   }
                 }
-              ]
-            }'
+             } else {
+                // script mode
+                const run = spawnSync('python', [pyFileName], { cwd: pyDir, encoding: 'utf-8', timeout: 5000 });
+                const actualLogs = run.stdout.split('\n').map(s => s.trim()).filter(Boolean);
+                
+                let matched = 0;
+                let failures = [];
+                for (let i = 0; i < expectedLogs.length; i++) {
+                   if (actualLogs[i] === expectedLogs[i].trim()) {
+                      matched++;
+                   } else {
+                      failures.push({ logNumber: i + 1, expected: expectedLogs[i], actual: actualLogs[i] });
+                   }
+                }
+                const score = expectedLogs.length ? (matched / expectedLogs.length) * 100 : 0;
+                results.push({
+                   passed: score === 100,
+                   score,
+                   matched,
+                   total: expectedLogs.length,
+                   failures
+                });
+             }
+          }
+          
+          const webhookPayload = {
+            jobId: payload.jobId,
+            status: "completed",
+            results
+          };
+
+          fetch(payload.webhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-webhook-secret': payload.webhookSecret
+            },
+            body: JSON.stringify(webhookPayload)
+          }).then(() => process.exit(0)).catch(() => process.exit(1));
+          EOF
+          
+          node run-eval.js
