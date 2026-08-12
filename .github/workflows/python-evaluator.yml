@@ -1,0 +1,44 @@
+name: Python Evaluator
+
+on:
+  repository_dispatch:
+    types: [run-python-evaluation]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Grader Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Clone Student Repository
+        run: git clone ${{ github.event.client_payload.repoUrl }} student-submission
+
+      - name: Run Python Evaluation
+        id: run-eval
+        run: |
+          # Replace this with your actual Python grading logic
+          # E.g., python evaluate.py ./student-submission
+          
+          echo "score=100" >> $GITHUB_OUTPUT
+
+      - name: Send Webhook Callback
+        if: always()
+        run: |
+          curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
+            -H "Content-Type: application/json" \
+            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
+            -d '{
+              "status": "completed",
+              "results": [
+                {
+                  "score": ${{ steps.run-eval.outputs.score || 0 }},
+                  "feedback": "Evaluation completed"
+                }
+              ]
+            }'
