@@ -40,6 +40,7 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
             -d '{
+              "jobId": "${{ github.event.client_payload.jobId }}",
               "status": "completed",
               "result": [
                 {
