@@ -1,0 +1,50 @@
+name: Visual Evaluator
+
+on:
+  repository_dispatch:
+    types: [run-visual-evaluation]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Grader Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js & Playwright
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install Dependencies
+        run: |
+          npm install
+          npx playwright install --with-deps
+
+      - name: Clone Student Repository
+        run: git clone ${{ github.event.client_payload.repoUrl }} student-submission
+
+      - name: Run Visual Evaluation
+        id: run-eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }} # Needed for GPT-4o vision
+        run: |
+          # Replace this with your actual Playwright/Vision grading logic
+          
+          echo "score=100" >> $GITHUB_OUTPUT
+
+      - name: Send Webhook Callback
+        if: always()
+        run: |
+          curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
+            -H "Content-Type: application/json" \
+            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
+            -d '{
+              "status": "completed",
+              "result": [
+                {
+                  "score": ${{ steps.run-eval.outputs.score || 0 }},
+                  "feedback": "Visual match successful"
+                }
+              ]
+            }'
