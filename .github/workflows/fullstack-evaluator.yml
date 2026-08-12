@@ -1,0 +1,121 @@
+name: Fullstack Evaluator
+
+on:
+  repository_dispatch:
+    types: [run-fullstack-evaluation]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Student Repository
+        run: |
+          REPO_URL="${{ github.event.client_payload.repoUrl }}"
+          git clone "$REPO_URL" student-submission
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Run Fullstack Build & Lint
+        id: run_build
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          cat << 'EOF' > run-eval.js
+          const fs = require('fs');
+          const path = require('path');
+          const { spawnSync } = require('child_process');
+          
+          const payload = JSON.parse(process.env.PAYLOAD);
+          const rootDir = path.join(process.cwd(), 'student-submission');
+          let outputLog = "";
+
+          function log(msg) {
+            outputLog += msg + "\n";
+            console.log(msg);
+          }
+          
+          // Helper to find directories with package.json
+          function findPackageJsonDirs(dir, depth = 0, dirs = []) {
+            if (depth > 2) return dirs;
+            if (!fs.existsSync(dir)) return dirs;
+            const files = fs.readdirSync(dir);
+            
+            if (files.includes('package.json')) {
+               dirs.push(dir);
+            }
+            
+            for (const name of files) {
+              if (name === 'node_modules' || name === '.git') continue;
+              const fp = path.join(dir, name);
+              if (fs.statSync(fp).isDirectory()) {
+                findPackageJsonDirs(fp, depth + 1, dirs);
+              }
+            }
+            return dirs;
+          }
+          
+          const targetDirs = findPackageJsonDirs(rootDir);
+          
+          if (targetDirs.length === 0) {
+            log("BUILD ERROR: No package.json found in the repository.");
+          } else {
+            for (const dir of targetDirs) {
+              const relPath = path.relative(rootDir, dir) || 'root';
+              log(`\n--- Processing [${relPath}] directory ---`);
+              
+              // 1. Install Dependencies
+              log(`Running npm install in ${relPath}...`);
+              const install = spawnSync('npm', ['install'], { cwd: dir, encoding: 'utf-8', timeout: 60000 });
+              if (install.status !== 0) {
+                 log(`npm install failed or produced warnings:\n${install.stderr || install.stdout}`);
+              } else {
+                 log(`npm install completed successfully.`);
+              }
+              
+              // 2. Check for build script
+              const pkgJson = require(path.join(dir, 'package.json'));
+              if (pkgJson.scripts && pkgJson.scripts.build) {
+                 log(`Running npm run build in ${relPath}...`);
+                 const build = spawnSync('npm', ['run', 'build'], { cwd: dir, encoding: 'utf-8', timeout: 120000 });
+                 if (build.status !== 0) {
+                    log(`BUILD: FAILED in ${relPath}\n${build.stderr || build.stdout}`);
+                 } else {
+                    log(`BUILD: SUCCESS in ${relPath}`);
+                 }
+              } else {
+                 log(`No build script found in ${relPath}. Skipping build.`);
+              }
+              
+              // 3. Optional: Check for test script (we just log it for AI to see)
+              if (pkgJson.scripts && pkgJson.scripts.test) {
+                 log(`Running npm run test in ${relPath}...`);
+                 // Run tests but ignore exit code so we still send output
+                 const test = spawnSync('npm', ['run', 'test'], { cwd: dir, encoding: 'utf-8', timeout: 60000 });
+                 log(`TEST OUTPUT:\n${test.stdout}\n${test.stderr}`);
+              }
+            }
+          }
+          
+          log("\nFullstack automated pre-check completed.");
+          
+          const webhookPayload = {
+            jobId: payload.jobId,
+            status: "completed",
+            testOutput: outputLog
+          };
+
+          fetch(payload.webhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-webhook-secret': payload.webhookSecret
+            },
+            body: JSON.stringify(webhookPayload)
+          }).then(() => process.exit(0)).catch(() => process.exit(1));
+          EOF
+          
+          node run-eval.js
+
