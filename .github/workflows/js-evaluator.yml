@@ -1,0 +1,44 @@
+name: JS Evaluator
+
+on:
+  repository_dispatch:
+    types: [run-js-evaluation]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Grader Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Clone Student Repository
+        run: git clone ${{ github.event.client_payload.repoUrl }} student-submission
+
+      - name: Run JS Evaluation
+        id: run-eval
+        run: |
+          # Replace this with your actual JS grading logic
+          # E.g., npm run evaluate:js -- --student-dir ./student-submission
+          
+          # For now, mocking a successful response
+          echo "score=100" >> $GITHUB_OUTPUT
+          echo "passed=true" >> $GITHUB_OUTPUT
+
+      - name: Send Webhook Callback
+        if: always()
+        run: |
+          curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
+            -H "Content-Type: application/json" \
+            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
+            -d '{
+              "status": "completed",
+              "evaluation": {
+                "passed": ${{ steps.run-eval.outputs.passed || false }},
+                "score": ${{ steps.run-eval.outputs.score || 0 }}
+              }
+            }'
