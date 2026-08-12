@@ -108,12 +108,17 @@ jobs:
           Please carefully analyze the attached screenshot of their rendered website alongside their source code.
           Determine how well they met the rubric requirements.
 
+          **IMPORTANT GRADING INSTRUCTIONS:**
+          1. **Focus on Functionality First:** Heavily prioritize the JavaScript logic, HTML structure, and core functionality (e.g., does the time/date update? do the buttons work?). 
+          2. **Be Lenient on CSS:** If the design is broken, completely unstyled (e.g., black text on a white page), or classes/IDs are mismatched, DO NOT give a zero. Give them partial or mostly full marks for the JavaScript functionality they successfully built.
+          3. **Verify with Code:** If the screenshot is unstyled or hard to read, look at the attached source code to confirm their logic works. Give credit for working code even if it's visually unappealing.
+
           Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
           {
             "score": <number 0-100>,
             "summary": "1-2 sentences summarizing their attempt.",
-            "strengths": ["1 thing they did well"],
-            "issues": ["1-2 things that need fixing based on the rubric"]
+            "strengths": ["1 thing they did well, especially regarding JS logic"],
+            "issues": ["1-2 things that need fixing based on the rubric (can mention broken CSS but don't heavily penalize)"]
           }
               `.trim();
 
