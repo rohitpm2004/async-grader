@@ -8,46 +8,81 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Grader Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
       - name: Clone Student Repository
         run: |
           REPO_URL="${{ github.event.client_payload.repoUrl }}"
-          # Fallback clone logic
-          git clone "$REPO_URL" student-submission || echo "Failed to clone"
+          git clone "$REPO_URL" student-submission
 
-      - name: Extract Code Context
-        id: extract
+      - name: Extract Code and Send Webhook
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
-          # Find all important backend JS files, excluding node_modules, build folders, or huge files.
-          # We aggregate them into one text file to send back to the webhook.
-          cd student-submission || exit 0
+          cat << 'EOF' > extract-and-send.js
+          const fs = require('fs');
+          const path = require('path');
           
-          CODE_OUTPUT=""
+          const payload = JSON.parse(process.env.PAYLOAD);
+          const dir = path.join(process.cwd(), 'student-submission');
           
-          # Find up to 15 relevant javascript/json files (models, controllers, routes, index, app, server, package.json)
-          FILES=$(find . -type f \( -name "*.js" -o -name "package.json" \) -not -path "*/node_modules/*" -not -path "*/dist/*" -not -path "*/build/*" | head -n 15)
+          let codeContext = '';
+          let count = 0;
           
-          for file in $FILES; do
-            # Add file separator and truncate each file to 2500 characters to prevent massive payloads
-            CODE_OUTPUT="$CODE_OUTPUT\n\n--- $file ---\n"
-            FILE_CONTENT=$(head -c 2500 "$file")
-            CODE_OUTPUT="$CODE_OUTPUT$FILE_CONTENT"
-          done
+          function walkSync(currentDirPath) {
+            if (count > 20) return;
+            const files = fs.readdirSync(currentDirPath);
+            for (const name of files) {
+              if (name === 'node_modules' || name === '.git' || name === 'dist' || name === 'build' || name === 'package-lock.json') continue;
+              const filePath = path.join(currentDirPath, name);
+              const stat = fs.statSync(filePath);
+              if (stat.isFile()) {
+                if (name.endsWith('.js') || name === 'package.json') {
+                  const content = fs.readFileSync(filePath, 'utf8').slice(0, 3000);
+                  const relPath = path.relative(dir, filePath);
+                  codeContext += `\n--- ${relPath} ---\n${content}\n`;
+                  count++;
+                }
+              } else if (stat.isDirectory()) {
+                walkSync(filePath);
+              }
+            }
+          }
           
-          # Escape quotes and newlines for JSON payload
-          ESCAPED_OUTPUT=$(echo "$CODE_OUTPUT" | jq -R -s '.')
-          echo "CODE_CONTEXT=$ESCAPED_OUTPUT" >> $GITHUB_ENV
+          try {
+            walkSync(dir);
+          } catch(e) {
+            console.error("Error reading files:", e);
+          }
+          
+          const webhookPayload = {
+            jobId: payload.jobId,
+            status: "completed",
+            testOutput: codeContext
+          };
 
-      - name: Send Webhook Callback
-        if: always()
-        run: |
-          # Send the extracted code context back to the central-evaluators backendWorker
-          PAYLOAD=$(jq -n \
-            --arg jobId "${{ github.event.client_payload.jobId }}" \
-            --arg status "completed" \
-            --arg testOutput "${{ env.CODE_CONTEXT }}" \
-            '{jobId: $jobId, status: $status, testOutput: ($testOutput | fromjson)}')
+          fetch(payload.webhookUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-webhook-secret': payload.webhookSecret
+            },
+            body: JSON.stringify(webhookPayload)
+          }).then(async res => {
+            console.log('Webhook status:', res.status);
+            const text = await res.text();
+            console.log('Webhook response:', text);
+            process.exit(0);
+          }).catch(err => {
+            console.error('Webhook failed:', err);
+            process.exit(1);
+          });
+          EOF
           
-          curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
-            -H "Content-Type: application/json" \
-            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
-            -d "$PAYLOAD"
+          node extract-and-send.js
