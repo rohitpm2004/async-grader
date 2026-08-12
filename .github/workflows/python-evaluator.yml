@@ -53,11 +53,10 @@ jobs:
           }
           findPy(dir);
           
-          const extra = payload.extraPayload || {};
-          const testCases = extra.testCases || [];
-          const evaluationMode = extra.evaluationMode || 'script';
-          const entryFunction = extra.entryFunction;
-          const expectedLogs = extra.expectedLogs || [];
+          const testCases = payload.testCases || [];
+          const evaluationMode = payload.evaluationMode || 'script';
+          const entryFunction = payload.entryFunction;
+          const expectedLogs = payload.expectedLogs || [];
           
           let results = [];
           
@@ -69,20 +68,21 @@ jobs:
              
              if (evaluationMode === 'function') {
                 for (const tc of testCases) {
+                   const modName = pyFileName.replace('.py', '');
                    const wrapper = 
                    "import sys, json, traceback\n" +
                    "sys.path.append('.')\n" +
                    "try:\n" +
-                   "    from " + pyFileName.replace('.py', '') + " import " + entryFunction + "\n" +
+                   "    from " + modName + " import " + entryFunction + "\n" +
                    "    inputs = json.loads(sys.argv[1])\n" +
                    "    if isinstance(inputs, list):\n" +
                    "        res = " + entryFunction + "(*inputs)\n" +
                    "    else:\n" +
                    "        res = " + entryFunction + "(inputs)\n" +
-                   "    print(json.dumps({'success': True, 'output': res}))\n" +
+                   "    print(json.dumps({\"success\": True, \"output\": res}))\n" +
                    "except Exception as e:\n" +
-                   "    print(json.dumps({'success': False, 'error': str(e), 'trace': traceback.format_exc()}))\n";
-
+                   "    print(json.dumps({\"success\": False, \"error\": str(e), \"trace\": traceback.format_exc()}))\n";
+                   
                    fs.writeFileSync(path.join(pyDir, 'test_wrapper.py'), wrapper);
                    const argsStr = JSON.stringify(Array.isArray(tc.input) ? tc.input : [tc.input]);
                    const run = spawnSync('python', ['test_wrapper.py', argsStr], { cwd: pyDir, encoding: 'utf-8', timeout: 5000 });
@@ -141,3 +141,4 @@ jobs:
           EOF
           
           node run-eval.js
+
