@@ -21,25 +21,99 @@ jobs:
 
       - name: Run JS Evaluation
         id: run-eval
-        run: |
-          # Replace this with your actual JS grading logic
-          # E.g., npm run evaluate:js -- --student-dir ./student-submission
-          
-          # For now, mocking a successful response
-          echo "score=100" >> $GITHUB_OUTPUT
-          echo "passed=true" >> $GITHUB_OUTPUT
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const payload = JSON.parse(process.env.PAYLOAD);
+            
+            let studentCode = '';
+            try {
+              const dir = path.join(process.cwd(), 'student-submission');
+              const files = fs.readdirSync(dir);
+              const jsFile = files.find(f => f.endsWith('.js'));
+              if (!jsFile) throw new Error('No .js file found in repository');
+              studentCode = fs.readFileSync(path.join(dir, jsFile), 'utf-8');
+            } catch(e) {
+              fs.writeFileSync('result.json', JSON.stringify({ passed: false, score: 0, feedback: e.message }));
+              process.exit(0);
+            }
+
+            studentCode = studentCode.replace(/export\s+default\s+/g, '')
+                                     .replace(/export\s+/g, '')
+                                     .replace(/import\s+.*?from\s+['\"].*?['\"];?/g, '');
+
+            const runScriptMode = () => {
+              const expectedLogs = payload.expectedLogs || [];
+              let actualLogs = [];
+              const origLog = console.log;
+              console.log = (...args) => { actualLogs.push(args.join(' ')); };
+              try {
+                eval(studentCode);
+              } catch(e) {
+                return { passed: false, score: 0, feedback: e.message };
+              } finally {
+                console.log = origLog;
+              }
+              let matched = 0;
+              for(let i=0; i<expectedLogs.length; i++) {
+                 if(String(actualLogs[i]).trim() === String(expectedLogs[i]).trim()) matched++;
+              }
+              const score = expectedLogs.length ? Math.round((matched / expectedLogs.length)*100) : 100;
+              return { passed: score === 100, score, feedback: \`Matched \${matched} of \${expectedLogs.length} logs.\` };
+            };
+
+            const runFunctionMode = () => {
+              let passed = 0;
+              const testCases = payload.testCases || [];
+              if (!testCases.length) return { passed: true, score: 100, feedback: 'No test cases' };
+              let actualLogs = [];
+              const origLog = console.log;
+              console.log = (...args) => { actualLogs.push(args.join(' ')); };
+              try {
+                const module = { exports: {} }; const exports = module.exports;
+                eval(studentCode);
+                const fn = eval(payload.entryFunction);
+                if (typeof fn !== 'function') throw new Error(\`\${payload.entryFunction} is not a function\`);
+                
+                for (const tc of testCases) {
+                   const args = Array.isArray(tc.input) ? tc.input : [tc.input];
+                   const res = fn(...args);
+                   if (JSON.stringify(res) === JSON.stringify(tc.expected)) passed++;
+                }
+              } catch(e) {
+                return { passed: false, score: 0, feedback: e.message };
+              } finally {
+                console.log = origLog;
+              }
+              const score = Math.round((passed / testCases.length)*100);
+              return { passed: score === 100, score, feedback: \`Passed \${passed} of \${testCases.length} tests.\` };
+            };
+
+            let res;
+            if (payload.evaluationMode === 'script') res = runScriptMode();
+            else res = runFunctionMode();
+
+            fs.writeFileSync('result.json', JSON.stringify(res));
+          "
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
 
       - name: Send Webhook Callback
         if: always()
         run: |
+          SCORE=$(jq -r '.score' result.json || echo 0)
+          PASSED=$(jq -r '.passed' result.json || echo false)
+          FEEDBACK=$(jq -r '.feedback' result.json || echo "Unknown error")
+          
           curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
-            -d '{
-              "jobId": "${{ github.event.client_payload.jobId }}",
-              "status": "completed",
-              "evaluation": {
-                "passed": true,
-                "score": 100
+            -d "{
+              \"jobId\": \"${{ github.event.client_payload.jobId }}\",
+              \"status\": \"completed\",
+              \"evaluation\": {
+                \"passed\": $PASSED,
+                \"score\": $SCORE,
+                \"feedback\": \"$FEEDBACK\"
               }
-            }'
+            }"
