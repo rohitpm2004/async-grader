@@ -97,24 +97,24 @@ jobs:
 
               // OpenAI Grading
               const prompt = `
-You are an expert web development instructor grading a student's HTML/CSS/JS assignment.
+          You are an expert web development instructor grading a student's HTML/CSS/JS assignment.
 
-## Rubric:
-${payload.rubricText || 'Grade the design and functionality.'}
+          ## Rubric:
+          ${payload.rubricText || 'Grade the design and functionality.'}
 
-## Student's Code (truncated):
-${codeContext}
+          ## Student's Code (truncated):
+          ${codeContext}
 
-Please carefully analyze the attached screenshot of their rendered website alongside their source code.
-Determine how well they met the rubric requirements.
+          Please carefully analyze the attached screenshot of their rendered website alongside their source code.
+          Determine how well they met the rubric requirements.
 
-Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
-{
-  "score": <number 0-100>,
-  "summary": "1-2 sentences summarizing their attempt.",
-  "strengths": ["1 thing they did well"],
-  "issues": ["1-2 things that need fixing based on the rubric"]
-}
+          Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
+          {
+            "score": <number 0-100>,
+            "summary": "1-2 sentences summarizing their attempt.",
+            "strengths": ["1 thing they did well"],
+            "issues": ["1-2 things that need fixing based on the rubric"]
+          }
               `.trim();
 
               const response = await openai.chat.completions.create({
