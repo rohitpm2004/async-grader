@@ -3,19 +3,21 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import React from 'react';
 import '@testing-library/jest-dom';
 
-// Helper to dynamically import the Todo component so it fails gracefully if missing
 async function getTodoComponent() {
-  try {
-    const module = await import('./components/todo.jsx');
-    return module.default;
-  } catch (err) {
+  const paths = [
+    './components/todo.jsx',
+    './Components/todo.jsx',
+    './components/Todo.jsx',
+    './todo.jsx',
+    './Todo.jsx'
+  ];
+  for (const p of paths) {
     try {
-      const module = await import('./Components/todo.jsx');
+      const module = await import(p);
       return module.default;
-    } catch {
-      throw new Error("Could not find src/components/todo.jsx");
-    }
+    } catch (err) {}
   }
+  throw new Error("Could not find Todo component in src/components/todo.jsx or src/todo.jsx");
 }
 
 describe('React Todo Grader', () => {
