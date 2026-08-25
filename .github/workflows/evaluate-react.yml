@@ -61,7 +61,7 @@ jobs:
           echo "Installing Vitest and testing library dependencies..."
           npm install vitest @testing-library/react @testing-library/dom @testing-library/jest-dom jsdom --no-save --legacy-peer-deps || true
           echo "Running Vitest..."
-          npx vitest run src/todo.spec.jsx --globals --reporter=json --outputFile=../test-results.json || npx vitest run todo.spec.jsx --globals --reporter=json --outputFile=../test-results.json || true
+          npx vitest run src/todo.spec.jsx --globals --environment jsdom --reporter=json --outputFile=../test-results.json || npx vitest run todo.spec.jsx --globals --environment jsdom --reporter=json --outputFile=../test-results.json || true
           cat ../test-results.json || echo "No test results file."
 
       - name: Send Webhook Result
