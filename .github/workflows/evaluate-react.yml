@@ -51,6 +51,19 @@ jobs:
           npx eslint . --ext .js,.jsx,.ts,.tsx > linter-report.txt || true
           cat linter-report.txt
 
+      - name: Inject and Run React Rubric Tests
+        id: tests
+        working-directory: ./student-repo
+        continue-on-error: true
+        run: |
+          echo "Injecting todo.spec.jsx into student-repo/src..."
+          cp ../todo.spec.jsx ./src/todo.spec.jsx || cp ../todo.spec.jsx ./todo.spec.jsx || true
+          echo "Installing Vitest and testing library dependencies..."
+          npm install vitest @testing-library/react @testing-library/jest-dom jsdom --no-save --legacy-peer-deps || true
+          echo "Running Vitest..."
+          npx vitest run src/todo.spec.jsx --reporter=json --outputFile=../test-results.json || npx vitest run todo.spec.jsx --reporter=json --outputFile=../test-results.json || true
+          cat ../test-results.json || echo "No test results file."
+
       - name: Send Webhook Result
         if: always()
         run: |
@@ -63,6 +76,9 @@ jobs:
             OUTPUT="Build: Success.\nLinter Report:\n$LINT_OUTPUT"
           fi
           
+          # Read test results
+          TEST_JSON=$(cat test-results.json 2>/dev/null || echo '{"error": "No test results file generated due to build/execution error."}')
+          
           # Send back to Node server
           curl -X POST \
             -H "Content-Type: application/json" \
@@ -71,5 +87,6 @@ jobs:
               --arg status "$STATUS" \
               --arg output "$OUTPUT" \
               --arg jobId "${{ github.event.client_payload.jobId }}" \
-              '{jobId: $jobId, status: $status, testOutput: $output}')" \
+              --argjson testResults "$TEST_JSON" \
+              '{jobId: $jobId, status: $status, testOutput: $output, testResults: $testResults}')" \
             "${{ github.event.client_payload.webhookUrl }}"
