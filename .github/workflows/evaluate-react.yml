@@ -8,11 +8,12 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Student Code
+      - name: Checkout Grader Repository
         uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event.client_payload.repoUrl }}
-          path: student-repo
+
+      - name: Clone Student Repository
+        run: |
+          git clone "${{ github.event.client_payload.repoUrl }}" student-repo
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
