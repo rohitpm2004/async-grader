@@ -1,5 +1,4 @@
-name: Backend Evaluator
-
+name: Backend Evaluation
 on:
   repository_dispatch:
     types: [run-backend-evaluation]
@@ -7,82 +6,39 @@ on:
 jobs:
   evaluate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout Grader Repository
-        uses: actions/checkout@v3
+      - name: Clone student repo
+        run: |
+          git clone --depth 1 "${{ github.event.client_payload.repoUrl }}" student-project
+        continue-on-error: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
-      
-      - name: Clone Student Repository
-        run: |
-          REPO_URL="${{ github.event.client_payload.repoUrl }}"
-          git clone "$REPO_URL" student-submission
+          node-version: '20'
 
-      - name: Extract Code and Send Webhook
-        env:
-          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+      - name: Install dependencies
         run: |
-          cat << 'EOF' > extract-and-send.js
-          const fs = require('fs');
-          const path = require('path');
-          
-          const payload = JSON.parse(process.env.PAYLOAD);
-          const dir = path.join(process.cwd(), 'student-submission');
-          
-          let codeContext = '';
-          let count = 0;
-          
-          function walkSync(currentDirPath) {
-            if (count > 20) return;
-            const files = fs.readdirSync(currentDirPath);
-            for (const name of files) {
-              if (name === 'node_modules' || name === '.git' || name === 'dist' || name === 'build' || name === 'package-lock.json') continue;
-              const filePath = path.join(currentDirPath, name);
-              const stat = fs.statSync(filePath);
-              if (stat.isFile()) {
-                if (name.endsWith('.js') || name === 'package.json') {
-                  const content = fs.readFileSync(filePath, 'utf8').slice(0, 3000);
-                  const relPath = path.relative(dir, filePath);
-                  codeContext += `\n--- ${relPath} ---\n${content}\n`;
-                  count++;
-                }
-              } else if (stat.isDirectory()) {
-                walkSync(filePath);
-              }
-            }
-          }
-          
-          try {
-            walkSync(dir);
-          } catch(e) {
-            console.error("Error reading files:", e);
-          }
-          
-          const webhookPayload = {
-            jobId: payload.jobId,
-            status: "completed",
-            testOutput: codeContext
-          };
+          cd student-project
+          npm install
+          npm install --save-dev jest supertest axios 2>/dev/null || true
+        continue-on-error: true
 
-          fetch(payload.webhookUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-webhook-secret': payload.webhookSecret
-            },
-            body: JSON.stringify(webhookPayload)
-          }).then(async res => {
-            console.log('Webhook status:', res.status);
-            const text = await res.text();
-            console.log('Webhook response:', text);
-            process.exit(0);
-          }).catch(err => {
-            console.error('Webhook failed:', err);
-            process.exit(1);
-          });
-          EOF
-          
-          node extract-and-send.js
+      - name: Write spec file
+        run: |
+          echo "${{ github.event.client_payload.specFile }}" | base64 -d > student-project/evaluator.test.js
+        continue-on-error: false
+
+      - name: Run Jest
+        run: |
+          cd student-project
+          npx jest evaluator.test.js --config '{}' --json --outputFile=../jest-results.json --forceExit --testTimeout=15000 || true
+
+      - name: Send results to webhook
+        run: |
+          RESULTS=$(cat jest-results.json 2>/dev/null || echo '{}')
+          curl -X POST "${{ github.event.client_payload.webhookUrl }}" \
+            -H "Content-Type: application/json" \
+            -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
+            -d "{\"jobId\": \"${{ github.event.client_payload.jobId }}\", \"status\": \"completed\", \"testResults\": $RESULTS}"
