@@ -6,6 +6,11 @@ on:
 jobs:
   evaluate:
     runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
     timeout-minutes: 10
     steps:
       - name: Clone student repo
