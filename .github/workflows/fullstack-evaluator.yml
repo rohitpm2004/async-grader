@@ -36,7 +36,14 @@ jobs:
           for dir in backend frontend server client api app; do
             if [ -d "$ROOT_DIR/student-project/$dir" ] && [ -f "$ROOT_DIR/student-project/$dir/package.json" ]; then
               echo "Installing dependencies inside student-project/$dir..."
-              cd "$ROOT_DIR/student-project/$dir" && npm install --legacy-peer-deps || true
+              cd "$ROOT_DIR/student-project/$dir"
+              
+              # Force install vite devDependency if it's a frontend folder to ensure command exists
+              if [ "$dir" = "frontend" ] || [ "$dir" = "client" ]; then
+                npm install --save-dev vite --legacy-peer-deps || true
+              fi
+              
+              npm install --legacy-peer-deps || true
             fi
           done
           cd "$ROOT_DIR"
@@ -65,16 +72,18 @@ jobs:
           export PORT=5000
           export MONGODB_URI="mongodb://localhost:27017/fullstack-test"
           
-          # Try starting in background
-          npm run start &
-          
-          # Fallback to direct node launches if package script isn't running or starts with other name
-          if [ -f "server.js" ]; then
-            node server.js &
-          elif [ -f "index.js" ]; then
-            node index.js &
-          elif [ -f "src/server.js" ]; then
-            node src/server.js &
+          # Check if there is a start script. If yes, run npm start. Otherwise, fall back to direct launch.
+          has_start=$(node -e "try { console.log(!!require('./package.json').scripts?.start) } catch { console.log(false) }")
+          if [ "$has_start" = "true" ]; then
+            npm run start &
+          else
+            if [ -f "server.js" ]; then
+              node server.js &
+            elif [ -f "index.js" ]; then
+              node index.js &
+            elif [ -f "src/server.js" ]; then
+              node src/server.js &
+            fi
           fi
           
           sleep 5
@@ -116,4 +125,3 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${{ github.event.client_payload.webhookSecret }}" \
             -d "{\"jobId\": \"${{ github.event.client_payload.jobId }}\", \"status\": \"completed\", \"testResults\": $RESULTS}"
-
