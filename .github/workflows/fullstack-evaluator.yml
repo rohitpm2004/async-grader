@@ -18,46 +18,87 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies (Backend & Frontend)
+      - name: Setup Runner Node Environment (outside student project)
         run: |
-          cd student-project
-          npm install --legacy-peer-deps || true
+          npm init -y
+          npm install @playwright/test axios
+          npx playwright install --with-deps chromium
+
+      - name: Install Student Backend & Frontend Dependencies
+        run: |
+          # Install root if package.json exists
+          if [ -f "student-project/package.json" ]; then
+            cd student-project && npm install --legacy-peer-deps || true && cd ..
+          fi
           
+          # Install subdirectories if present
           for dir in backend frontend server client api app; do
-            if [ -d "$dir" ]; then
-              cd "$dir" && npm install --legacy-peer-deps || true && cd ..
+            if [ -d "student-project/$dir" ] && [ -f "student-project/$dir/package.json" ]; then
+              cd "student-project/$dir" && npm install --legacy-peer-deps || true && cd ../..
             fi
           done
 
-      - name: Install Playwright Browsers
-        run: |
-          npx playwright install --with-deps chromium
-
       - name: Write spec file
         run: |
-          echo "${{ github.event.client_payload.specFile }}" | base64 -d > student-project/fullstack.spec.js
+          echo "${{ github.event.client_payload.specFile }}" | base64 -d > fullstack.spec.js
 
       - name: Start Backend Server
         run: |
-          cd student-project
+          # Detect backend directory
+          B_DIR="student-project"
+          for dir in student-project/backend student-project/server student-project/api; do
+            if [ -f "$dir/package.json" ]; then
+              B_DIR="$dir"
+              break
+            fi
+          done
+          echo "Starting backend from: $B_DIR"
+          cd "$B_DIR"
           export PORT=5001
           export MONGODB_URI="mongodb://localhost:27017/fullstack-test"
+          
+          # Try starting in background
           npm run start &
+          
+          # Fallback to direct node launches if package script isn't running or starts with other name
+          if [ -f "server.js" ]; then
+            node server.js &
+          elif [ -f "index.js" ]; then
+            node index.js &
+          elif [ -f "src/server.js" ]; then
+            node src/server.js &
+          fi
+          
           sleep 4
+          cd -
         continue-on-error: true
 
       - name: Start Frontend Server
         run: |
-          cd student-project
+          # Detect frontend directory
+          F_DIR="student-project"
+          for dir in student-project/frontend student-project/client student-project/app; do
+            if [ -f "$dir/package.json" ]; then
+              F_DIR="$dir"
+              break
+            fi
+          done
+          echo "Starting frontend from: $F_DIR"
+          cd "$F_DIR"
           export PORT=5173
+          
+          # Try run dev or start
           npm run dev &
+          npm run start &
+          
           sleep 6
+          cd -
         continue-on-error: true
 
       - name: Run Playwright Tests
         run: |
-          cd student-project
-          npx playwright test fullstack.spec.js --reporter=json > ../playwright-results.json || true
+          # Run playwright from the runner's root directory pointing to fullstack.spec.js
+          npx playwright test fullstack.spec.js --reporter=json > playwright-results.json || true
 
       - name: Send results to webhook
         run: |
