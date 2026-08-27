@@ -41,37 +41,33 @@ jobs:
             # Create default index.html if missing
             if [ ! -f "$F_DIR/index.html" ]; then
               echo "index.html is missing. Generating default index.html..."
-              cat << 'EOF' > "$F_DIR/index.html"
-              <!DOCTYPE html>
-              <html lang="en">
-                <head>
-                  <meta charset="UTF-8" />
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-                  <title>E-Commerce Store</title>
-                </head>
-                <body>
-                  <div id="root"></div>
-                  <script type="module" src="/src/main.jsx"></script>
-                </body>
-              </html>
-EOF
+              echo '<!DOCTYPE html>' > "$F_DIR/index.html"
+              echo '<html lang="en">' >> "$F_DIR/index.html"
+              echo '  <head>' >> "$F_DIR/index.html"
+              echo '    <meta charset="UTF-8" />' >> "$F_DIR/index.html"
+              echo '    <meta name="viewport" content="width=device-width, initial-scale=1.0" />' >> "$F_DIR/index.html"
+              echo '    <title>E-Commerce Store</title>' >> "$F_DIR/index.html"
+              echo '  </head>' >> "$F_DIR/index.html"
+              echo '  <body>' >> "$F_DIR/index.html"
+              echo '    <div id="root"></div>' >> "$F_DIR/index.html"
+              echo '    <script type="module" src="/src/main.jsx"></script>' >> "$F_DIR/index.html"
+              echo '  </body>' >> "$F_DIR/index.html"
+              echo '</html>' >> "$F_DIR/index.html"
             fi
 
             # Create default src/main.jsx entry if missing
             if [ ! -f "$F_DIR/src/main.jsx" ] && [ ! -f "$F_DIR/src/index.jsx" ] && [ ! -f "$F_DIR/src/main.js" ] && [ ! -f "$F_DIR/src/index.js" ]; then
               echo "React entry main.jsx is missing. Generating default src/main.jsx..."
               mkdir -p "$F_DIR/src"
-              cat << 'EOF' > "$F_DIR/src/main.jsx"
-              import React from 'react'
-              import ReactDOM from 'react-dom/client'
-              import App from './App.jsx'
-
-              ReactDOM.createRoot(document.getElementById('root')).render(
-                <React.StrictMode>
-                  <App />
-                </React.StrictMode>
-              )
-EOF
+              echo "import React from 'react'" > "$F_DIR/src/main.jsx"
+              echo "import ReactDOM from 'react-dom/client'" >> "$F_DIR/src/main.jsx"
+              echo "import App from './App.jsx'" >> "$F_DIR/src/main.jsx"
+              echo "" >> "$F_DIR/src/main.jsx"
+              echo "ReactDOM.createRoot(document.getElementById('root')).render(" >> "$F_DIR/src/main.jsx"
+              echo "  <React.StrictMode>" >> "$F_DIR/src/main.jsx"
+              echo "    <App />" >> "$F_DIR/src/main.jsx"
+              echo "  </React.StrictMode>" >> "$F_DIR/src/main.jsx"
+              echo ")" >> "$F_DIR/src/main.jsx"
             fi
           else
             echo "No dedicated frontend src directory found."
