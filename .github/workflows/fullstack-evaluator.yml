@@ -26,17 +26,20 @@ jobs:
 
       - name: Install Student Backend & Frontend Dependencies
         run: |
+          ROOT_DIR=$(pwd)
           # Install root if package.json exists
-          if [ -f "student-project/package.json" ]; then
-            cd student-project && npm install --legacy-peer-deps || true && cd ..
+          if [ -f "$ROOT_DIR/student-project/package.json" ]; then
+            cd "$ROOT_DIR/student-project" && npm install --legacy-peer-deps || true
           fi
           
           # Install subdirectories if present
           for dir in backend frontend server client api app; do
-            if [ -d "student-project/$dir" ] && [ -f "student-project/$dir/package.json" ]; then
-              cd "student-project/$dir" && npm install --legacy-peer-deps || true && cd ../..
+            if [ -d "$ROOT_DIR/student-project/$dir" ] && [ -f "$ROOT_DIR/student-project/$dir/package.json" ]; then
+              echo "Installing dependencies inside student-project/$dir..."
+              cd "$ROOT_DIR/student-project/$dir" && npm install --legacy-peer-deps || true
             fi
           done
+          cd "$ROOT_DIR"
 
       - name: Write spec file
         run: |
@@ -44,17 +47,22 @@ jobs:
 
       - name: Start Backend Server
         run: |
+          # Kill any existing process using port 5000 or 5001 to prevent EADDRINUSE conflicts
+          sudo fuser -k 5000/tcp || true
+          sudo fuser -k 5001/tcp || true
+          
+          ROOT_DIR=$(pwd)
           # Detect backend directory
-          B_DIR="student-project"
+          B_DIR="$ROOT_DIR/student-project"
           for dir in student-project/backend student-project/server student-project/api; do
-            if [ -f "$dir/package.json" ]; then
-              B_DIR="$dir"
+            if [ -f "$ROOT_DIR/$dir/package.json" ]; then
+              B_DIR="$ROOT_DIR/$dir"
               break
             fi
           done
           echo "Starting backend from: $B_DIR"
           cd "$B_DIR"
-          export PORT=5001
+          export PORT=5000
           export MONGODB_URI="mongodb://localhost:27017/fullstack-test"
           
           # Try starting in background
@@ -69,17 +77,18 @@ jobs:
             node src/server.js &
           fi
           
-          sleep 4
-          cd -
+          sleep 5
+          cd "$ROOT_DIR"
         continue-on-error: true
 
       - name: Start Frontend Server
         run: |
+          ROOT_DIR=$(pwd)
           # Detect frontend directory
-          F_DIR="student-project"
+          F_DIR="$ROOT_DIR/student-project"
           for dir in student-project/frontend student-project/client student-project/app; do
-            if [ -f "$dir/package.json" ]; then
-              F_DIR="$dir"
+            if [ -f "$ROOT_DIR/$dir/package.json" ]; then
+              F_DIR="$ROOT_DIR/$dir"
               break
             fi
           done
@@ -92,7 +101,7 @@ jobs:
           npm run start &
           
           sleep 6
-          cd -
+          cd "$ROOT_DIR"
         continue-on-error: true
 
       - name: Run Playwright Tests
