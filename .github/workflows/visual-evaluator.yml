@@ -36,7 +36,7 @@ jobs:
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
-          node -e "
+          cat << 'EOF' > run-eval.js
           const fs = require('fs');
           const path = require('path');
           const cheerio = require('cheerio');
@@ -145,7 +145,7 @@ jobs:
             let cssLinked = false;
             let jsLinked = false;
             if ($) {
-              $('link[rel=\"stylesheet\"]').each((i, el) => {
+              $('link[rel="stylesheet"]').each((i, el) => {
                 const href = $(el).attr('href');
                 if (href) {
                   const resolved = path.join(path.dirname(htmlFiles[0]), href);
@@ -209,7 +209,7 @@ jobs:
               let reason = '';
 
               // A. Linking / File Connection Criterion
-              if (d.includes('link') || d.includes('connect') || d.includes('structure') && d.includes('project')) {
+              if (d.includes('link') || d.includes('connect') || (d.includes('structure') && d.includes('project'))) {
                 if (cssLinked && (jsLinked || jsFiles.length === 0)) {
                   awarded = c.weight;
                   reason = 'Stylesheet and script files are properly linked in HTML and exist in the repository.';
@@ -222,7 +222,7 @@ jobs:
                 }
               }
               // B. HTML Structure & Markup Criterion
-              else if (d.includes('html') || d.includes('structure') || d.includes('layout') && !d.includes('css')) {
+              else if (d.includes('html') || d.includes('structure') || (d.includes('layout') && !d.includes('css'))) {
                 if ($ && isHtmlClosed && mainHtmlContent.length > 80 && ($('body').children().length > 0)) {
                   awarded = c.weight;
                   reason = 'Well-structured HTML with properly closed semantic tags and containers.';
@@ -266,7 +266,7 @@ jobs:
                   reason = 'JavaScript logic is incomplete or missing.';
                 }
               }
-              // E. Specific Feature / Interactivity Criterion (e.g. clock, toggle, counter, lock, input, etc.)
+              // E. Specific Feature / Interactivity Criterion
               else {
                 if (jsSyntaxErrors.length > 0) {
                   awarded = 0;
@@ -275,7 +275,7 @@ jobs:
                   awarded = 0;
                   reason = 'Required functional logic is missing or commented out in JavaScript.';
                 } else {
-                  const keywords = d.split(/\\s+/).filter(w => w.length > 3 && !['with', 'from', 'that', 'this', 'have', 'been'].includes(w));
+                  const keywords = d.split(/\s+/).filter(w => w.length > 3 && !['with', 'from', 'that', 'this', 'have', 'been'].includes(w));
                   const foundInDom = $ && keywords.some(k => mainHtmlContent.toLowerCase().includes(k));
                   const foundInJs = keywords.some(k => allActiveJs.toLowerCase().includes(k));
 
@@ -339,54 +339,56 @@ jobs:
               }
             }));
           });
-          "
+          EOF
+
+          node run-eval.js
 
       - name: Send Webhook Callback
         if: always()
         run: |
-          node -e "
-            const fs = require('fs');
-            const https = require('https');
-            const http = require('http');
+          node -e '
+            const fs = require("fs");
+            const https = require("https");
+            const http = require("http");
 
-            let resultObj = { score: 0, feedback: { summary: 'Evaluation completed.', strengths: [], issues: [], breakdown: [] } };
+            let resultObj = { score: 0, feedback: { summary: "Evaluation completed.", strengths: [], issues: [], breakdown: [] } };
             try {
-              if (fs.existsSync('result.json')) {
-                resultObj = JSON.parse(fs.readFileSync('result.json', 'utf8'));
+              if (fs.existsSync("result.json")) {
+                resultObj = JSON.parse(fs.readFileSync("result.json", "utf8"));
               }
             } catch (e) {}
 
             const payloadData = {
-              jobId: '${{ github.event.client_payload.jobId }}',
-              status: 'completed',
+              jobId: "${{ github.event.client_payload.jobId }}",
+              status: "completed",
               result: {
-                score: typeof resultObj.score === 'number' ? resultObj.score : 0,
+                score: typeof resultObj.score === "number" ? resultObj.score : 0,
                 feedback: resultObj.feedback
               }
             };
 
             const data = JSON.stringify(payloadData);
-            const webhookUrl = '${{ github.event.client_payload.webhookUrl }}';
-            const secret = '${{ github.event.client_payload.webhookSecret }}';
+            const webhookUrl = "${{ github.event.client_payload.webhookUrl }}";
+            const secret = "${{ github.event.client_payload.webhookSecret }}";
 
             const u = new URL(webhookUrl);
-            const reqLib = u.protocol === 'https:' ? https : http;
+            const reqLib = u.protocol === "https:" ? https : http;
 
             const req = reqLib.request(webhookUrl, {
-              method: 'POST',
+              method: "POST",
               headers: {
-                'Content-Type': 'application/json',
-                'x-webhook-secret': secret,
-                'Content-Length': Buffer.byteLength(data)
+                "Content-Type": "application/json",
+                "x-webhook-secret": secret,
+                "Content-Length": Buffer.byteLength(data)
               }
             }, (res) => {
-              console.log('Webhook responded with status:', res.statusCode);
+              console.log("Webhook responded with status:", res.statusCode);
             });
 
-            req.on('error', (e) => {
-              console.error('Webhook request error:', e);
+            req.on("error", (e) => {
+              console.error("Webhook request error:", e);
             });
 
             req.write(data);
             req.end();
-          "
+          '
