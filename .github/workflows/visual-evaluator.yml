@@ -26,18 +26,22 @@ jobs:
         run: |
           REPO_URL="${{ github.event.client_payload.repoUrl }}"
           if [[ "$REPO_URL" == *"/blob/"* || "$REPO_URL" == *".html" ]]; then
-            # Not supported for visual - visual needs full folder
             mkdir -p student-submission
             RAW_URL=$(echo "$REPO_URL" | sed 's|/blob/|/raw/|')
             curl -sL "$RAW_URL" -o student-submission/index.html
           else
-            git clone "$REPO_URL" student-submission
+            git clone "$REPO_URL" student-submission || {
+              echo "Git clone failed. Creating fallback empty submission."
+              mkdir -p student-submission
+            }
           fi
 
       - name: Run Visual Evaluation
         id: run-eval
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: "https://api.deepseek.com"
+          OPENAI_MODEL: "deepseek-v4-flash"
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
           cat << 'EOF' > run-eval.js
@@ -47,12 +51,16 @@ jobs:
           const path = require('path');
           const { OpenAI } = require('openai');
 
-          const payload = JSON.parse(process.env.PAYLOAD);
-          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+          const payload = JSON.parse(process.env.PAYLOAD || '{}');
           const DIR = path.join(process.cwd(), 'student-submission');
 
-          // 1. Simple Static Server
+          // Initialize OpenAI client pointing to DeepSeek
+          const openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY,
+            baseURL: process.env.OPENAI_BASE_URL || 'https://api.deepseek.com'
+          });
+
+          // 1. Simple Static Server for Student's Webpage
           const server = http.createServer((req, res) => {
             let filePath = path.join(DIR, req.url === '/' ? 'index.html' : req.url);
             if (!fs.existsSync(filePath)) {
@@ -75,84 +83,87 @@ jobs:
             let codeContext = '';
             
             try {
-              // Extract Code
-              const files = ['index.html', 'style.css', 'script.js', 'app.js', 'styles.css'];
+              // Extract Student Source Code
+              const files = ['index.html', 'style.css', 'script.js', 'app.js', 'styles.css', 'main.js'];
               for (const file of files) {
                 const fp = path.join(DIR, file);
                 if (fs.existsSync(fp)) {
-                  codeContext += `\n--- ${file} ---\n${fs.readFileSync(fp, 'utf8').slice(0, 1500)}\n`;
+                  codeContext += `\n--- ${file} ---\n${fs.readFileSync(fp, 'utf8').slice(0, 3000)}\n`;
                 }
               }
 
-              // Take Screenshot
-              const browser = await chromium.launch();
-              const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-              const page = await context.newPage();
-              await page.goto('http://localhost:3000', { waitUntil: 'networkidle', timeout: 15000 });
-              
-              const buffer = await page.screenshot({ fullPage: true });
-              screenshotBase64 = buffer.toString('base64');
-              
-              await browser.close();
+              // Render in Playwright & Capture Screenshot
+              try {
+                const browser = await chromium.launch();
+                const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+                const page = await context.newPage();
+                await page.goto('http://localhost:3000', { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+                
+                const buffer = await page.screenshot({ fullPage: true }).catch(() => null);
+                if (buffer) {
+                  screenshotBase64 = buffer.toString('base64');
+                }
+                await browser.close().catch(() => {});
+              } catch (browserErr) {
+                console.warn("Browser capture warning:", browserErr.message);
+              }
 
-              // OpenAI Grading
+              // Build Prompt
               const prompt = `
           You are an expert web development instructor grading a student's HTML/CSS/JS assignment.
 
-          ## Rubric:
-          ${payload.rubricText || 'Grade the design and functionality.'}
+          ## Rubric / Requirements:
+          ${payload.rubricText || 'Grade the design, HTML structure, CSS styling, and JavaScript functionality.'}
 
-          ## Student's Code (truncated):
-          ${codeContext}
-
-          Please carefully analyze the attached screenshot of their rendered website alongside their source code.
-          Determine how well they met the rubric requirements.
+          ## Student's Code:
+          ${codeContext || 'No source files detected in repository.'}
 
           **IMPORTANT GRADING INSTRUCTIONS:**
-          1. **Focus on Functionality First:** Heavily prioritize the JavaScript logic, HTML structure, and core functionality (e.g., does the time/date update? do the buttons work?). 
-          2. **Be Lenient on CSS:** If the design is broken, completely unstyled (e.g., black text on a white page), or classes/IDs are mismatched, DO NOT give a zero. Give them partial or mostly full marks for the JavaScript functionality they successfully built.
-          3. **Verify with Code:** If the screenshot is unstyled or hard to read, look at the attached source code to confirm their logic works. Give credit for working code even if it's visually unappealing.
+          1. **Functionality & Logic First:** Check the JavaScript logic, event listeners, DOM updates, and HTML structure.
+          2. **Strict But Fair Scoring:** Award marks based on how many rubric requirements are actually implemented in code.
+          3. **Never fail on styling quirks:** If the JavaScript works, award full credit for the functional requirements.
 
           Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
           {
-            "score": <number 0-100>,
-            "summary": "1-2 sentences summarizing their attempt.",
-            "strengths": ["1 thing they did well, especially regarding JS logic"],
-            "issues": ["1-2 things that need fixing based on the rubric (can mention broken CSS but don't heavily penalize)"]
+            "score": <integer 0-100>,
+            "summary": "1-2 sentences summarizing their attempt and implementation.",
+            "strengths": ["1-2 things they implemented correctly in HTML/CSS/JS"],
+            "issues": ["1-2 specific missing features or bugs based on rubric"]
           }
               `.trim();
 
+              const model = process.env.OPENAI_MODEL || 'deepseek-v4-flash';
+              
+              // Call DeepSeek API
               const response = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
+                model: model,
                 messages: [
                   {
                     role: "user",
-                    content: [
-                      { type: "text", text: prompt },
-                      { type: "image_url", image_url: { url: `data:image/png;base64,${screenshotBase64}` } }
-                    ]
+                    content: prompt
                   }
                 ],
-                max_tokens: 300,
+                max_tokens: 500,
                 temperature: 0.2,
                 response_format: { type: "json_object" }
               });
 
-              const resultStr = response.choices[0].message.content.trim();
+              const resultStr = response.choices[0]?.message?.content?.trim() || "{}";
               const resultObj = JSON.parse(resultStr);
               
-              // Map output format to what central-evaluators expects
+              const finalScore = typeof resultObj.score === 'number' ? Math.max(0, Math.min(100, Math.round(resultObj.score))) : 0;
+
               fs.writeFileSync('result.json', JSON.stringify({
-                score: resultObj.score,
+                score: finalScore,
                 feedback: JSON.stringify({
-                  summary: resultObj.summary,
-                  strengths: resultObj.strengths || [],
+                  summary: resultObj.summary || "Evaluation completed.",
+                  strengths: resultObj.strengths || (finalScore === 100 ? ["Passed all requirements."] : []),
                   issues: resultObj.issues || []
                 })
               }));
 
             } catch (err) {
-              console.error(err);
+              console.error("Evaluation script error:", err);
               fs.writeFileSync('result.json', JSON.stringify({
                 score: 0,
                 feedback: JSON.stringify({
