@@ -70,10 +70,9 @@ jobs:
           function parseRubricCriteria(rawRubric) {
             if (!rawRubric) {
               return [
-                { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML page layout, semantic tags, and valid structure' },
-                { name: 'File Linking & Connections', weight: 15, desc: 'Proper linking of stylesheet and javascript files in HTML' },
-                { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling and layout properties' },
-                { name: 'JavaScript DOM & Interactivity', weight: 35, desc: 'Active JavaScript logic, event listeners, and DOM mutations' }
+                { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML layout and structure', selector: 'body' },
+                { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling', selector: null },
+                { name: 'JavaScript Functionality', weight: 50, desc: 'JavaScript DOM interactivity', selector: null }
               ];
             }
 
@@ -83,11 +82,16 @@ jobs:
 
               let list = Array.isArray(parsed) ? parsed : (parsed.criteria || parsed.items || []);
               if (Array.isArray(list) && list.length > 0) {
-                return list.map((c, i) => ({
-                  name: c.name || c.description || ('Criterion ' + (i + 1)),
-                  weight: Number(c.weight ?? c.score ?? c.max ?? 20) || 20,
-                  desc: (c.description || c.name || '').toLowerCase()
-                }));
+                return list.map((c, i) => {
+                  const desc = c.description || c.name || '';
+                  const selectorMatch = desc.match(/selector:\s*([#\.\w\-\,]+)/i);
+                  return {
+                    name: c.name || c.description || ('Criterion ' + (i + 1)),
+                    weight: Number(c.weight ?? c.score ?? c.max ?? 20) || 20,
+                    desc: desc.toLowerCase(),
+                    selector: selectorMatch ? selectorMatch[1].trim() : null
+                  };
+                });
               }
             } catch (e) {}
 
@@ -98,15 +102,22 @@ jobs:
                                   line.match(/\[(\d+)\s*(?:pts?|points?|marks?|%)\]/i) ||
                                   line.match(/(\d+)\s*(?:pts?|points?|marks?)\s*[-:]/i);
               const weight = weightMatch ? parseInt(weightMatch[1], 10) : 20;
-              const name = line.replace(/^\d+[\.\)]\s*/, '').replace(/^[-*•]\s*/, '').replace(/\(.*\)/, '').trim();
-              if (name) items.push({ name: name, weight: weight, desc: name.toLowerCase() });
+              const name = line.replace(/^\d+[\.\)]\s*/, '').replace(/^[-*•]\s*/, '').trim();
+              const selectorMatch = name.match(/selector:\s*([#\.\w\-\,]+)/i);
+              if (name) {
+                items.push({
+                  name: name,
+                  weight: weight,
+                  desc: name.toLowerCase(),
+                  selector: selectorMatch ? selectorMatch[1].trim() : null
+                });
+              }
             }
 
             return items.length > 0 ? items : [
-              { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML page layout, semantic tags, and valid structure' },
-              { name: 'File Linking & Connections', weight: 15, desc: 'Proper linking of stylesheet and javascript files in HTML' },
-              { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling and layout properties' },
-              { name: 'JavaScript DOM & Interactivity', weight: 35, desc: 'Active JavaScript logic, event listeners, and DOM mutations' }
+              { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML layout and structure', selector: 'body' },
+              { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling', selector: null },
+              { name: 'JavaScript Functionality', weight: 50, desc: 'JavaScript DOM interactivity', selector: null }
             ];
           }
 
@@ -120,16 +131,16 @@ jobs:
               fs.writeFileSync('result.json', JSON.stringify({
                 score: 0,
                 feedback: {
-                  summary: 'Evaluation completed: Repository contains no HTML, CSS, or JavaScript files.',
+                  summary: 'Evaluation completed: Repository contains no source code files.',
                   strengths: [],
-                  issues: ['No source code files found in repository.'],
-                  breakdown: defaultCriteria.map(c => ({ item: c.name, awarded: 0, max: c.weight, reason: 'No files submitted.' }))
+                  issues: ['No HTML, CSS, or JavaScript files submitted.'],
+                  breakdown: defaultCriteria.map(c => ({ item: c.name, awarded: 0, max: c.weight, reason: 'No files found in repository.' }))
                 }
               }));
               return;
             }
 
-            // 1. Read & Parse HTML
+            // 1. Parse HTML
             let mainHtmlContent = '';
             let isHtmlClosed = false;
             let $ = null;
@@ -141,38 +152,13 @@ jobs:
               } catch (e) {}
             }
 
-            // 2. Check File Connections (link & script tags)
-            let cssLinked = false;
-            let jsLinked = false;
-            if ($) {
-              $('link[rel="stylesheet"]').each((i, el) => {
-                const href = $(el).attr('href');
-                if (href) {
-                  const resolved = path.join(path.dirname(htmlFiles[0]), href);
-                  if (fs.existsSync(resolved) || cssFiles.some(f => f.endsWith(path.basename(href)))) {
-                    cssLinked = true;
-                  }
-                }
-              });
-              $('script[src]').each((i, el) => {
-                const src = $(el).attr('src');
-                if (src) {
-                  const resolved = path.join(path.dirname(htmlFiles[0]), src);
-                  if (fs.existsSync(resolved) || jsFiles.some(f => f.endsWith(path.basename(src)))) {
-                    jsLinked = true;
-                  }
-                }
-              });
-            }
-
-            // 3. Read & Validate CSS
+            // 2. Read CSS
             let allActiveCss = '';
             for (const f of cssFiles) {
-              const raw = fs.readFileSync(f, 'utf8');
-              allActiveCss += '\n' + stripComments(raw);
+              allActiveCss += '\n' + stripComments(fs.readFileSync(f, 'utf8'));
             }
 
-            // 4. Read & Validate JavaScript across all JS files
+            // 3. Read & Validate JavaScript
             let allActiveJs = '';
             let jsSyntaxErrors = [];
             let hasRawJsCode = false;
@@ -191,11 +177,27 @@ jobs:
               }
             }
 
-            const isJsValid = jsSyntaxErrors.length === 0 && allActiveJs.length > 0;
-            const hasEventHandling = allActiveJs.includes('addEventListener') || allActiveJs.includes('onclick') || allActiveJs.includes('.on');
-            const hasDomMutation = allActiveJs.includes('innerText') || allActiveJs.includes('innerHTML') || allActiveJs.includes('textContent') || allActiveJs.includes('value') || allActiveJs.includes('classList');
+            const hasActiveJs = allActiveJs.trim().length > 0;
+            const isJsSyntaxValid = jsSyntaxErrors.length === 0 && hasActiveJs;
 
-            // 5. Evaluate Rubric Criteria Deterministically
+            // Strict DOM Mutation check (must actually assign to elements)
+            const hasDomMutations = allActiveJs.includes('innerHTML') ||
+                                    allActiveJs.includes('innerText') ||
+                                    allActiveJs.includes('textContent') ||
+                                    allActiveJs.includes('value =') ||
+                                    allActiveJs.includes('value=') ||
+                                    allActiveJs.includes('classList.');
+
+            const hasEventListeners = allActiveJs.includes('addEventListener') ||
+                                      allActiveJs.includes('onclick') ||
+                                      allActiveJs.includes('.onclick');
+
+            const hasIntervalOrDate = allActiveJs.includes('setInterval') ||
+                                      allActiveJs.includes('setTimeout') ||
+                                      allActiveJs.includes('new Date') ||
+                                      allActiveJs.includes('Date(');
+
+            // 4. Strict Rubric Scoring
             const criteria = parseRubricCriteria(payload.rubricText);
             const totalMax = criteria.reduce((sum, c) => sum + c.weight, 0) || 100;
             let earnedScore = 0;
@@ -205,115 +207,118 @@ jobs:
 
             for (const c of criteria) {
               const d = c.desc;
-              let awarded = 0;
+              let passed = false;
               let reason = '';
 
-              // A. Linking / File Connection Criterion
-              if (d.includes('link') || d.includes('connect') || (d.includes('structure') && d.includes('project'))) {
-                if (cssLinked && (jsLinked || jsFiles.length === 0)) {
-                  awarded = c.weight;
-                  reason = 'Stylesheet and script files are properly linked in HTML and exist in the repository.';
-                } else if (cssLinked || jsLinked) {
-                  awarded = Math.round(c.weight * 0.5);
-                  reason = 'Partial file connection: either CSS or JS link is missing or pointing to a non-existent file.';
+              // Check 1: Explicit Selector mentioned in Rubric
+              let targetSelector = c.selector;
+              if (!targetSelector) {
+                if (d.includes('#time')) targetSelector = '#time';
+                else if (d.includes('#date')) targetSelector = '#date';
+                else if (d.includes('#toggle-btn') || d.includes('.toggle-btn')) targetSelector = '#toggle-btn, .toggle-btn, button';
+                else if (d.includes('.clock-card') || d.includes('#clock')) targetSelector = '.clock-card, #clock, .container';
+              }
+
+              // Evaluate by criterion type
+              if (d.includes('html') || (d.includes('layout') && !d.includes('behavior'))) {
+                const hasContainer = targetSelector ? ($ && $(targetSelector).length > 0) : ($ && $('body').children().length > 0);
+                if ($ && isHtmlClosed && hasContainer) {
+                  passed = true;
+                  reason = 'HTML layout container present and properly closed.';
+                } else if (!isHtmlClosed) {
+                  reason = 'HTML file is incomplete or tags are unclosed.';
                 } else {
-                  awarded = 0;
-                  reason = 'Stylesheet (<link>) and Script (<script>) are not linked or point to missing files.';
+                  reason = 'Required HTML container (' + (targetSelector || 'body') + ') not found.';
                 }
               }
-              // B. HTML Structure & Markup Criterion
-              else if (d.includes('html') || d.includes('structure') || (d.includes('layout') && !d.includes('css'))) {
-                if ($ && isHtmlClosed && mainHtmlContent.length > 80 && ($('body').children().length > 0)) {
-                  awarded = c.weight;
-                  reason = 'Well-structured HTML with properly closed semantic tags and containers.';
-                } else if ($ && mainHtmlContent.length > 40) {
-                  awarded = Math.round(c.weight * 0.3);
-                  reason = 'Incomplete HTML structure (tags unclosed or missing elements).';
+              else if (d.includes('css') || d.includes('style') || d.includes('design')) {
+                if (allActiveCss.length > 40 && allActiveCss.includes('{') && allActiveCss.includes('}')) {
+                  passed = true;
+                  reason = 'CSS stylesheet with active styling rules verified.';
                 } else {
-                  awarded = 0;
-                  reason = 'HTML file is missing, empty, or unparseable.';
+                  reason = 'CSS stylesheet is missing or empty.';
                 }
               }
-              // C. CSS Styling & Design Criterion
-              else if (d.includes('css') || d.includes('style') || d.includes('design') || d.includes('responsive')) {
-                if (allActiveCss.length > 60 && (allActiveCss.includes('{') && allActiveCss.includes('}'))) {
-                  awarded = c.weight;
-                  reason = 'Active CSS rules, styling properties, and visual layout implemented.';
-                } else if (allActiveCss.length > 20) {
-                  awarded = Math.round(c.weight * 0.4);
-                  reason = 'Minimal CSS styling provided.';
+              else if (d.includes('time') && !d.includes('toggle') && !d.includes('format')) {
+                const hasTimeElement = $ && ($('#time, .time, #clock, .clock').length > 0);
+                const hasClockJs = isJsSyntaxValid && hasIntervalOrDate && hasDomMutations;
+
+                if (hasTimeElement && hasClockJs) {
+                  passed = true;
+                  reason = 'Time display element present in HTML and active live interval updates in JavaScript.';
+                } else if (!hasTimeElement) {
+                  reason = 'Missing time display container (#time or .time) in HTML.';
+                } else if (jsSyntaxErrors.length > 0) {
+                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join('; ');
                 } else {
-                  awarded = 0;
-                  reason = 'CSS stylesheet is empty or missing active styles.';
+                  reason = 'Missing active setInterval() or live DOM time updates in JavaScript.';
                 }
               }
-              // D. General JS / DOM Functionality Criterion
-              else if (d.includes('js') || d.includes('javascript') || d.includes('function') || d.includes('logic') || d.includes('dom')) {
-                if (jsSyntaxErrors.length > 0) {
-                  awarded = 0;
-                  reason = 'JavaScript syntax error prevented execution: ' + jsSyntaxErrors.join(', ');
-                } else if (!hasRawJsCode || (hasRawJsCode && allActiveJs.length === 0)) {
-                  awarded = 0;
-                  reason = 'JavaScript code is completely commented out or empty.';
-                } else if (isJsValid && hasDomMutation) {
-                  awarded = c.weight;
-                  reason = 'Active JavaScript logic, event handling, and DOM manipulation verified without errors.';
-                } else if (isJsValid) {
-                  awarded = Math.round(c.weight * 0.6);
-                  reason = 'JavaScript syntax is valid but lacks active DOM updates.';
+              else if (d.includes('date')) {
+                const hasDateElement = $ && ($('#date, .date').length > 0);
+                const hasDateJs = isJsSyntaxValid && (allActiveJs.includes('Date') || allActiveJs.includes('toLocaleDateString') || allActiveJs.includes('getDate')) && hasDomMutations;
+
+                if (hasDateElement && hasDateJs) {
+                  passed = true;
+                  reason = 'Date display element (#date) found and date retrieval logic implemented.';
+                } else if (!hasDateElement) {
+                  reason = 'Missing date display container (#date) in HTML.';
+                } else if (jsSyntaxErrors.length > 0) {
+                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join('; ');
                 } else {
-                  awarded = 0;
-                  reason = 'JavaScript logic is incomplete or missing.';
+                  reason = 'Missing active Date retrieval or formatting in JavaScript.';
                 }
               }
-              // E. Specific Feature / Interactivity Criterion
+              else if (d.includes('toggle') || d.includes('format') || d.includes('switch') || d.includes('click') || d.includes('button')) {
+                const hasButton = $ && ($('#toggle-btn, .toggle-btn, button, input[type="button"]').length > 0);
+                const hasButtonJs = isJsSyntaxValid && hasEventListeners;
+
+                if (hasButton && hasButtonJs) {
+                  passed = true;
+                  reason = 'Interactive button element found and click event listener logic attached.';
+                } else if (!hasButton) {
+                  reason = 'Missing button/toggle element (#toggle-btn) in HTML.';
+                } else if (jsSyntaxErrors.length > 0) {
+                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join('; ');
+                } else {
+                  reason = 'Missing active addEventListener() or click event handler in JavaScript.';
+                }
+              }
               else {
+                // General JavaScript Functionality
                 if (jsSyntaxErrors.length > 0) {
-                  awarded = 0;
-                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join(', ');
-                } else if (allActiveJs.length === 0) {
-                  awarded = 0;
-                  reason = 'Required functional logic is missing or commented out in JavaScript.';
+                  reason = 'JavaScript syntax error prevented execution: ' + jsSyntaxErrors.join('; ');
+                } else if (!hasActiveJs) {
+                  reason = hasRawJsCode ? 'JavaScript code is completely commented out.' : 'JavaScript file is missing or empty.';
+                } else if (isJsSyntaxValid && (hasDomMutations || hasEventListeners)) {
+                  passed = true;
+                  reason = 'Active JavaScript DOM logic and event handling verified without syntax errors.';
                 } else {
-                  const keywords = d.split(/\s+/).filter(w => w.length > 3 && !['with', 'from', 'that', 'this', 'have', 'been'].includes(w));
-                  const foundInDom = $ && keywords.some(k => mainHtmlContent.toLowerCase().includes(k));
-                  const foundInJs = keywords.some(k => allActiveJs.toLowerCase().includes(k));
-
-                  if (foundInDom && foundInJs && hasDomMutation) {
-                    awarded = c.weight;
-                    reason = 'Feature elements found in HTML and functional logic implemented in JavaScript.';
-                  } else if (foundInJs) {
-                    awarded = Math.round(c.weight * 0.7);
-                    reason = 'Feature logic found in JavaScript code.';
-                  } else if (foundInDom) {
-                    awarded = Math.round(c.weight * 0.4);
-                    reason = 'UI elements present in HTML, but active JavaScript logic is missing.';
-                  } else {
-                    awarded = 0;
-                    reason = 'Requirement not found in active HTML or JavaScript code.';
-                  }
+                  reason = 'JavaScript lacks active DOM manipulation or functional logic.';
                 }
               }
 
+              const awarded = passed ? c.weight : 0;
               earnedScore += awarded;
+
               breakdown.push({ item: c.name, awarded: awarded, max: c.weight, reason: reason });
-              if (awarded === c.weight) {
+              if (passed) {
                 strengths.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
               } else {
-                issues.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
+                issues.push('[' + c.name + '] ' + reason + ' (earned 0/' + c.weight + ' marks)');
               }
             }
 
             const finalScore = Math.round((earnedScore / totalMax) * 100);
             let summary = '';
             if (finalScore === 100) {
-              summary = 'Outstanding! All HTML structure, CSS styling, file links, and JavaScript DOM requirements are fully satisfied.';
+              summary = 'Outstanding! All HTML structure, CSS styling, and JavaScript DOM requirements are fully satisfied.';
             } else if (finalScore >= 60) {
-              summary = 'Good effort. Your project meets core requirements with a score of ' + finalScore + '/100, but has minor missing elements or broken links.';
+              summary = 'Good effort. Your project meets core requirements with a score of ' + finalScore + '/100, but has missing elements or syntax issues.';
             } else if (finalScore > 0) {
               summary = 'Evaluation score: ' + finalScore + '/100. Several required features, active JavaScript functions, or HTML elements are missing.';
             } else {
-              summary = 'Evaluation score: 0/100. Code is either completely commented out, has fatal syntax errors, or missing required files.';
+              summary = 'Evaluation score: 0/100. Code contains fatal syntax errors, is commented out, or missing required DOM elements.';
             }
 
             fs.writeFileSync('result.json', JSON.stringify({
@@ -379,14 +384,18 @@ jobs:
               headers: {
                 "Content-Type": "application/json",
                 "x-webhook-secret": secret,
-                "Content-Length": Buffer.byteLength(data)
+                "Content-Length": Buffer.byteLength(data),
+                "Connection": "close"
               }
             }, (res) => {
               console.log("Webhook responded with status:", res.statusCode);
+              res.resume();
+              res.on("end", () => process.exit(0));
             });
 
             req.on("error", (e) => {
               console.error("Webhook request error:", e);
+              process.exit(0);
             });
 
             req.write(data);
