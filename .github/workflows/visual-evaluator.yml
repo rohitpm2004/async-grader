@@ -152,6 +152,36 @@ jobs:
               } catch (e) {}
             }
 
+            // --- EDGE CASE FIX: Verify Connections in HTML ---
+            let cssConnected = false;
+            let jsConnected = false;
+            
+            if ($) {
+              // Check CSS connections
+              $('link[rel="stylesheet"]').each((i, el) => {
+                const href = $(el).attr('href');
+                if (href) {
+                  const cssName = path.basename(href.split('?')[0]);
+                  const cssExists = cssFiles.some(f => path.basename(f) === cssName);
+                  if (cssExists) cssConnected = true;
+                }
+              });
+
+              // Check JS connections
+              $('script').each((i, el) => {
+                const src = $(el).attr('src');
+                if (src) {
+                  const jsName = path.basename(src.split('?')[0]);
+                  const jsExists = jsFiles.some(f => path.basename(f) === jsName);
+                  if (jsExists) jsConnected = true;
+                }
+              });
+              
+              // Accept inline styles/scripts if external files aren't used
+              if ($('style').text().trim().length > 10) cssConnected = true;
+              if ($('script:not([src])').text().trim().length > 10) jsConnected = true;
+            }
+
             // 2. Read CSS
             let allActiveCss = '';
             for (const f of cssFiles) {
@@ -233,8 +263,12 @@ jobs:
               }
               else if (d.includes('css') || d.includes('style') || d.includes('design')) {
                 if (allActiveCss.length > 40 && allActiveCss.includes('{') && allActiveCss.includes('}')) {
-                  passed = true;
-                  reason = 'CSS stylesheet with active styling rules verified.';
+                  if (!cssConnected) {
+                    reason = "CSS code exists but is NOT linked correctly in the HTML using <link rel='stylesheet'>.";
+                  } else {
+                    passed = true;
+                    reason = 'CSS stylesheet with active styling rules verified and linked correctly.';
+                  }
                 } else {
                   reason = 'CSS stylesheet is missing or empty.';
                 }
@@ -244,8 +278,12 @@ jobs:
                 const hasClockJs = isJsSyntaxValid && hasIntervalOrDate && hasDomMutations;
 
                 if (hasTimeElement && hasClockJs) {
-                  passed = true;
-                  reason = 'Time display element present in HTML and active live interval updates in JavaScript.';
+                  if (!jsConnected) {
+                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
+                  } else {
+                    passed = true;
+                    reason = 'Time display element present in HTML and active live interval updates in JavaScript.';
+                  }
                 } else if (!hasTimeElement) {
                   reason = 'Missing time display container (#time or .time) in HTML.';
                 } else if (jsSyntaxErrors.length > 0) {
@@ -259,8 +297,12 @@ jobs:
                 const hasDateJs = isJsSyntaxValid && (allActiveJs.includes('Date') || allActiveJs.includes('toLocaleDateString') || allActiveJs.includes('getDate')) && hasDomMutations;
 
                 if (hasDateElement && hasDateJs) {
-                  passed = true;
-                  reason = 'Date display element (#date) found and date retrieval logic implemented.';
+                  if (!jsConnected) {
+                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
+                  } else {
+                    passed = true;
+                    reason = 'Date display element (#date) found and date retrieval logic implemented.';
+                  }
                 } else if (!hasDateElement) {
                   reason = 'Missing date display container (#date) in HTML.';
                 } else if (jsSyntaxErrors.length > 0) {
@@ -274,8 +316,12 @@ jobs:
                 const hasButtonJs = isJsSyntaxValid && hasEventListeners;
 
                 if (hasButton && hasButtonJs) {
-                  passed = true;
-                  reason = 'Interactive button element found and click event listener logic attached.';
+                  if (!jsConnected) {
+                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
+                  } else {
+                    passed = true;
+                    reason = 'Interactive button element found and click event listener logic attached.';
+                  }
                 } else if (!hasButton) {
                   reason = 'Missing button/toggle element (#toggle-btn) in HTML.';
                 } else if (jsSyntaxErrors.length > 0) {
@@ -291,8 +337,12 @@ jobs:
                 } else if (!hasActiveJs) {
                   reason = hasRawJsCode ? 'JavaScript code is completely commented out.' : 'JavaScript file is missing or empty.';
                 } else if (isJsSyntaxValid && (hasDomMutations || hasEventListeners)) {
-                  passed = true;
-                  reason = 'Active JavaScript DOM logic and event handling verified without syntax errors.';
+                  if (!jsConnected) {
+                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
+                  } else {
+                    passed = true;
+                    reason = 'Active JavaScript DOM logic and event handling verified and linked correctly.';
+                  }
                 } else {
                   reason = 'JavaScript lacks active DOM manipulation or functional logic.';
                 }
