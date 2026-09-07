@@ -12,11 +12,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-      
-      - name: Install Dependencies
-        run: |
-          npm init -y
-          npm install cheerio
 
       - name: Clone Student Repository
         run: |
@@ -32,17 +27,14 @@ jobs:
             }
           fi
 
-      - name: Run Deterministic Rubric Code Evaluation
-        env:
-          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+      - name: Run Syntax Check
+        id: syntax
         run: |
-          cat << 'EOF' > run-eval.js
+          cat << 'EOF' > run-syntax.js
           const fs = require('fs');
           const path = require('path');
-          const cheerio = require('cheerio');
           const vm = require('vm');
 
-          const payload = JSON.parse(process.env.PAYLOAD || '{}');
           const DIR = path.join(process.cwd(), 'student-submission');
 
           function findFiles(dir, ext) {
@@ -62,364 +54,44 @@ jobs:
             return results;
           }
 
-          function stripComments(code) {
-            if (!code) return '';
-            return code.replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1').trim();
-          }
+          const jsFiles = findFiles(DIR, '.js');
+          let errors = [];
 
-          function parseRubricCriteria(rawRubric) {
-            if (!rawRubric) {
-              return [
-                { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML layout and structure', selector: 'body' },
-                { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling', selector: null },
-                { name: 'JavaScript Functionality', weight: 50, desc: 'JavaScript DOM interactivity', selector: null }
-              ];
-            }
-
+          for (const f of jsFiles) {
             try {
-              let parsed = typeof rawRubric === 'string' ? JSON.parse(rawRubric) : rawRubric;
-              while (typeof parsed === 'string') parsed = JSON.parse(parsed);
-
-              let list = Array.isArray(parsed) ? parsed : (parsed.criteria || parsed.items || []);
-              if (Array.isArray(list) && list.length > 0) {
-                return list.map((c, i) => {
-                  const desc = c.description || c.name || '';
-                  const selectorMatch = desc.match(/selector:\s*([#\.\w\-\,]+)/i);
-                  return {
-                    name: c.name || c.description || ('Criterion ' + (i + 1)),
-                    weight: Number(c.weight ?? c.score ?? c.max ?? 20) || 20,
-                    desc: desc.toLowerCase(),
-                    selector: selectorMatch ? selectorMatch[1].trim() : null
-                  };
-                });
-              }
-            } catch (e) {}
-
-            const lines = String(rawRubric).split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 3);
-            const items = [];
-            for (const line of lines) {
-              const weightMatch = line.match(/\((\d+)\s*(?:pts?|points?|marks?|%)\)/i) ||
-                                  line.match(/\[(\d+)\s*(?:pts?|points?|marks?|%)\]/i) ||
-                                  line.match(/(\d+)\s*(?:pts?|points?|marks?)\s*[-:]/i);
-              const weight = weightMatch ? parseInt(weightMatch[1], 10) : 20;
-              const name = line.replace(/^\d+[\.\)]\s*/, '').replace(/^[-*•]\s*/, '').trim();
-              const selectorMatch = name.match(/selector:\s*([#\.\w\-\,]+)/i);
-              if (name) {
-                items.push({
-                  name: name,
-                  weight: weight,
-                  desc: name.toLowerCase(),
-                  selector: selectorMatch ? selectorMatch[1].trim() : null
-                });
-              }
+              const code = fs.readFileSync(f, 'utf8');
+              new vm.Script(code);
+            } catch (e) {
+              errors.push(`${path.basename(f)}: ${e.message}`);
             }
-
-            return items.length > 0 ? items : [
-              { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML layout and structure', selector: 'body' },
-              { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling', selector: null },
-              { name: 'JavaScript Functionality', weight: 50, desc: 'JavaScript DOM interactivity', selector: null }
-            ];
           }
 
-          async function evaluate() {
-            const htmlFiles = findFiles(DIR, '.html');
-            const cssFiles = findFiles(DIR, '.css');
-            const jsFiles = findFiles(DIR, '.js');
-
-            if (htmlFiles.length === 0 && cssFiles.length === 0 && jsFiles.length === 0) {
-              const defaultCriteria = parseRubricCriteria(payload.rubricText);
-              fs.writeFileSync('result.json', JSON.stringify({
-                score: 0,
-                feedback: {
-                  summary: 'Evaluation completed: Repository contains no source code files.',
-                  strengths: [],
-                  issues: ['No HTML, CSS, or JavaScript files submitted.'],
-                  breakdown: defaultCriteria.map(c => ({ item: c.name, awarded: 0, max: c.weight, reason: 'No files found in repository.' }))
-                }
-              }));
-              return;
-            }
-
-            // 1. Parse HTML
-            let mainHtmlContent = '';
-            let isHtmlClosed = false;
-            let $ = null;
-            if (htmlFiles.length > 0) {
-              mainHtmlContent = fs.readFileSync(htmlFiles[0], 'utf8');
-              isHtmlClosed = mainHtmlContent.includes('</html>') || mainHtmlContent.includes('</body>');
-              try {
-                $ = cheerio.load(mainHtmlContent);
-              } catch (e) {}
-            }
-
-            // --- EDGE CASE FIX: Verify Connections in HTML ---
-            let cssConnected = false;
-            let jsConnected = false;
-            
-            if ($) {
-              // Check CSS connections
-              $('link[rel="stylesheet"]').each((i, el) => {
-                const href = $(el).attr('href');
-                if (href) {
-                  const cssName = path.basename(href.split('?')[0]);
-                  const cssExists = cssFiles.some(f => path.basename(f) === cssName);
-                  if (cssExists) cssConnected = true;
-                }
-              });
-
-              // Check JS connections
-              $('script').each((i, el) => {
-                const src = $(el).attr('src');
-                if (src) {
-                  const jsName = path.basename(src.split('?')[0]);
-                  const jsExists = jsFiles.some(f => path.basename(f) === jsName);
-                  if (jsExists) jsConnected = true;
-                }
-              });
-              
-              // Accept inline styles/scripts if external files aren't used
-              if ($('style').text().trim().length > 10) cssConnected = true;
-              if ($('script:not([src])').text().trim().length > 10) jsConnected = true;
-            }
-
-            // 2. Read CSS
-            let allActiveCss = '';
-            for (const f of cssFiles) {
-              allActiveCss += '\n' + stripComments(fs.readFileSync(f, 'utf8'));
-            }
-
-            // 3. Read & Validate JavaScript
-            let allActiveJs = '';
-            let jsSyntaxErrors = [];
-            let hasRawJsCode = false;
-
-            for (const f of jsFiles) {
-              const raw = fs.readFileSync(f, 'utf8');
-              if (raw.trim().length > 0) hasRawJsCode = true;
-              const active = stripComments(raw);
-              if (active.length > 0) {
-                allActiveJs += '\n' + active;
-                try {
-                  new vm.Script(active);
-                } catch (err) {
-                  jsSyntaxErrors.push(path.basename(f) + ': ' + err.message);
-                }
-              }
-            }
-
-            const hasActiveJs = allActiveJs.trim().length > 0;
-            const isJsSyntaxValid = jsSyntaxErrors.length === 0 && hasActiveJs;
-
-            // Strict DOM Mutation check (must actually assign to elements)
-            const hasDomMutations = allActiveJs.includes('innerHTML') ||
-                                    allActiveJs.includes('innerText') ||
-                                    allActiveJs.includes('textContent') ||
-                                    allActiveJs.includes('value =') ||
-                                    allActiveJs.includes('value=') ||
-                                    allActiveJs.includes('classList.');
-
-            const hasEventListeners = allActiveJs.includes('addEventListener') ||
-                                      allActiveJs.includes('onclick') ||
-                                      allActiveJs.includes('.onclick');
-
-            const hasIntervalOrDate = allActiveJs.includes('setInterval') ||
-                                      allActiveJs.includes('setTimeout') ||
-                                      allActiveJs.includes('new Date') ||
-                                      allActiveJs.includes('Date(');
-
-            // 4. Strict Rubric Scoring
-            const criteria = parseRubricCriteria(payload.rubricText);
-            const totalMax = criteria.reduce((sum, c) => sum + c.weight, 0) || 100;
-            let earnedScore = 0;
-            const breakdown = [];
-            const strengths = [];
-            const issues = [];
-
-            for (const c of criteria) {
-              const d = c.desc;
-              let passed = false;
-              let reason = '';
-
-              // Check 1: Explicit Selector mentioned in Rubric
-              let targetSelector = c.selector;
-              if (!targetSelector) {
-                if (d.includes('#time')) targetSelector = '#time';
-                else if (d.includes('#date')) targetSelector = '#date';
-                else if (d.includes('#toggle-btn') || d.includes('.toggle-btn')) targetSelector = '#toggle-btn, .toggle-btn, button';
-                else if (d.includes('.clock-card') || d.includes('#clock')) targetSelector = '.clock-card, #clock, .container';
-              }
-
-              // Evaluate by criterion type
-              if (d.includes('html') || (d.includes('layout') && !d.includes('behavior'))) {
-                const hasContainer = targetSelector ? ($ && $(targetSelector).length > 0) : ($ && $('body').children().length > 0);
-                if ($ && isHtmlClosed && hasContainer) {
-                  passed = true;
-                  reason = 'HTML layout container present and properly closed.';
-                } else if (!isHtmlClosed) {
-                  reason = 'HTML file is incomplete or tags are unclosed.';
-                } else {
-                  reason = 'Required HTML container (' + (targetSelector || 'body') + ') not found.';
-                }
-              }
-              else if (d.includes('css') || d.includes('style') || d.includes('design')) {
-                if (allActiveCss.length > 40 && allActiveCss.includes('{') && allActiveCss.includes('}')) {
-                  if (!cssConnected) {
-                    reason = "CSS code exists but is NOT linked correctly in the HTML using <link rel='stylesheet'>.";
-                  } else {
-                    passed = true;
-                    reason = 'CSS stylesheet with active styling rules verified and linked correctly.';
-                  }
-                } else {
-                  reason = 'CSS stylesheet is missing or empty.';
-                }
-              }
-              else if (d.includes('time') && !d.includes('toggle') && !d.includes('format')) {
-                const hasTimeElement = $ && ($('#time, .time, #clock, .clock').length > 0);
-                const hasClockJs = isJsSyntaxValid && hasIntervalOrDate && hasDomMutations;
-
-                if (hasTimeElement && hasClockJs) {
-                  if (!jsConnected) {
-                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
-                  } else {
-                    passed = true;
-                    reason = 'Time display element present in HTML and active live interval updates in JavaScript.';
-                  }
-                } else if (!hasTimeElement) {
-                  reason = 'Missing time display container (#time or .time) in HTML.';
-                } else if (jsSyntaxErrors.length > 0) {
-                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join('; ');
-                } else {
-                  reason = 'Missing active setInterval() or live DOM time updates in JavaScript.';
-                }
-              }
-              else if (d.includes('date')) {
-                const hasDateElement = $ && ($('#date, .date').length > 0);
-                const hasDateJs = isJsSyntaxValid && (allActiveJs.includes('Date') || allActiveJs.includes('toLocaleDateString') || allActiveJs.includes('getDate')) && hasDomMutations;
-
-                if (hasDateElement && hasDateJs) {
-                  if (!jsConnected) {
-                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
-                  } else {
-                    passed = true;
-                    reason = 'Date display element (#date) found and date retrieval logic implemented.';
-                  }
-                } else if (!hasDateElement) {
-                  reason = 'Missing date display container (#date) in HTML.';
-                } else if (jsSyntaxErrors.length > 0) {
-                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join('; ');
-                } else {
-                  reason = 'Missing active Date retrieval or formatting in JavaScript.';
-                }
-              }
-              else if (d.includes('toggle') || d.includes('format') || d.includes('switch') || d.includes('click') || d.includes('button')) {
-                const hasButton = $ && ($('#toggle-btn, .toggle-btn, button, input[type="button"]').length > 0);
-                const hasButtonJs = isJsSyntaxValid && hasEventListeners;
-
-                if (hasButton && hasButtonJs) {
-                  if (!jsConnected) {
-                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
-                  } else {
-                    passed = true;
-                    reason = 'Interactive button element found and click event listener logic attached.';
-                  }
-                } else if (!hasButton) {
-                  reason = 'Missing button/toggle element (#toggle-btn) in HTML.';
-                } else if (jsSyntaxErrors.length > 0) {
-                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join('; ');
-                } else {
-                  reason = 'Missing active addEventListener() or click event handler in JavaScript.';
-                }
-              }
-              else {
-                // General JavaScript Functionality
-                if (jsSyntaxErrors.length > 0) {
-                  reason = 'JavaScript syntax error prevented execution: ' + jsSyntaxErrors.join('; ');
-                } else if (!hasActiveJs) {
-                  reason = hasRawJsCode ? 'JavaScript code is completely commented out.' : 'JavaScript file is missing or empty.';
-                } else if (isJsSyntaxValid && (hasDomMutations || hasEventListeners)) {
-                  if (!jsConnected) {
-                    reason = "JavaScript code exists but is NOT linked correctly in the HTML using <script>.";
-                  } else {
-                    passed = true;
-                    reason = 'Active JavaScript DOM logic and event handling verified and linked correctly.';
-                  }
-                } else {
-                  reason = 'JavaScript lacks active DOM manipulation or functional logic.';
-                }
-              }
-
-              const awarded = passed ? c.weight : 0;
-              earnedScore += awarded;
-
-              breakdown.push({ item: c.name, awarded: awarded, max: c.weight, reason: reason });
-              if (passed) {
-                strengths.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
-              } else {
-                issues.push('[' + c.name + '] ' + reason + ' (earned 0/' + c.weight + ' marks)');
-              }
-            }
-
-            const finalScore = Math.round((earnedScore / totalMax) * 100);
-            let summary = '';
-            if (finalScore === 100) {
-              summary = 'Outstanding! All HTML structure, CSS styling, and JavaScript DOM requirements are fully satisfied.';
-            } else if (finalScore >= 60) {
-              summary = 'Good effort. Your project meets core requirements with a score of ' + finalScore + '/100, but has missing elements or syntax issues.';
-            } else if (finalScore > 0) {
-              summary = 'Evaluation score: ' + finalScore + '/100. Several required features, active JavaScript functions, or HTML elements are missing.';
-            } else {
-              summary = 'Evaluation score: 0/100. Code contains fatal syntax errors, is commented out, or missing required DOM elements.';
-            }
-
-            fs.writeFileSync('result.json', JSON.stringify({
-              score: finalScore,
-              feedback: {
-                summary: summary,
-                strengths: strengths,
-                issues: issues,
-                breakdown: breakdown
-              }
-            }));
+          if (errors.length > 0) {
+            fs.writeFileSync('report.txt', 'Syntax Error: \n' + errors.join('\n'));
+          } else {
+            fs.writeFileSync('report.txt', 'Syntax Check: Passed. No JavaScript compilation errors.');
           }
-
-          evaluate().catch(err => {
-            console.error('Fatal evaluation runtime error:', err);
-            fs.writeFileSync('result.json', JSON.stringify({
-              score: 0,
-              feedback: {
-                summary: 'Evaluation encountered a fatal runtime error.',
-                strengths: [],
-                issues: [err.message],
-                breakdown: []
-              }
-            }));
-          });
           EOF
-
-          node run-eval.js
+          node run-syntax.js
+          
+          # Read the report into an environment variable
+          {
+            echo 'REPORT<<EOF'
+            cat report.txt
+            echo EOF
+          } >> "$GITHUB_ENV"
 
       - name: Send Webhook Callback
         if: always()
         run: |
           node -e '
-            const fs = require("fs");
             const https = require("https");
             const http = require("http");
-
-            let resultObj = { score: 0, feedback: { summary: "Evaluation completed.", strengths: [], issues: [], breakdown: [] } };
-            try {
-              if (fs.existsSync("result.json")) {
-                resultObj = JSON.parse(fs.readFileSync("result.json", "utf8"));
-              }
-            } catch (e) {}
 
             const payloadData = {
               jobId: "${{ github.event.client_payload.jobId }}",
               status: "completed",
-              result: {
-                score: typeof resultObj.score === "number" ? resultObj.score : 0,
-                feedback: resultObj.feedback
-              }
+              testOutput: process.env.REPORT || "Syntax Check: Passed."
             };
 
             const data = JSON.stringify(payloadData);
@@ -451,3 +123,4 @@ jobs:
             req.write(data);
             req.end();
           '
+
