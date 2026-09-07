@@ -16,7 +16,7 @@ jobs:
       - name: Install Dependencies
         run: |
           npm init -y
-          npm install cheerio openai
+          npm install cheerio
 
       - name: Clone Student Repository
         run: |
@@ -32,19 +32,15 @@ jobs:
             }
           fi
 
-      - name: Run Dynamic Rubric Evaluation
+      - name: Run Deterministic Rubric Code Evaluation
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || 'https://api.deepseek.com' }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'deepseek-v4-flash' }}
         run: |
           node -e "
           const fs = require('fs');
           const path = require('path');
           const cheerio = require('cheerio');
           const vm = require('vm');
-          const OpenAI = require('openai');
 
           const payload = JSON.parse(process.env.PAYLOAD || '{}');
           const DIR = path.join(process.cwd(), 'student-submission');
@@ -74,9 +70,10 @@ jobs:
           function parseRubricCriteria(rawRubric) {
             if (!rawRubric) {
               return [
-                { name: 'HTML Structure & Layout', weight: 30, desc: 'HTML page structure, semantics, and markup' },
-                { name: 'CSS Styling & Design', weight: 30, desc: 'CSS styling, visual hierarchy, and layout' },
-                { name: 'JavaScript Interactivity & Logic', weight: 40, desc: 'Active JavaScript functions and core functionality' }
+                { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML page layout, semantic tags, and valid structure' },
+                { name: 'File Linking & Connections', weight: 15, desc: 'Proper linking of stylesheet and javascript files in HTML' },
+                { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling and layout properties' },
+                { name: 'JavaScript DOM & Interactivity', weight: 35, desc: 'Active JavaScript logic, event listeners, and DOM mutations' }
               ];
             }
 
@@ -89,7 +86,7 @@ jobs:
                 return list.map((c, i) => ({
                   name: c.name || c.description || ('Criterion ' + (i + 1)),
                   weight: Number(c.weight ?? c.score ?? c.max ?? 20) || 20,
-                  desc: c.description || c.name || ''
+                  desc: (c.description || c.name || '').toLowerCase()
                 }));
               }
             } catch (e) {}
@@ -101,14 +98,15 @@ jobs:
                                   line.match(/\[(\d+)\s*(?:pts?|points?|marks?|%)\]/i) ||
                                   line.match(/(\d+)\s*(?:pts?|points?|marks?)\s*[-:]/i);
               const weight = weightMatch ? parseInt(weightMatch[1], 10) : 20;
-              const name = line.replace(/^\d+[\.\)]\s*/, '').replace(/^[-*•]\s*/, '').trim();
-              if (name) items.push({ name: name, weight: weight, desc: name });
+              const name = line.replace(/^\d+[\.\)]\s*/, '').replace(/^[-*•]\s*/, '').replace(/\(.*\)/, '').trim();
+              if (name) items.push({ name: name, weight: weight, desc: name.toLowerCase() });
             }
 
             return items.length > 0 ? items : [
-              { name: 'HTML Structure & Layout', weight: 30, desc: 'HTML page structure and markup' },
-              { name: 'CSS Styling & Design', weight: 30, desc: 'CSS styling and visual design' },
-              { name: 'JavaScript Interactivity & Logic', weight: 40, desc: 'Active JavaScript logic and functionality' }
+              { name: 'HTML Structure & Markup', weight: 25, desc: 'HTML page layout, semantic tags, and valid structure' },
+              { name: 'File Linking & Connections', weight: 15, desc: 'Proper linking of stylesheet and javascript files in HTML' },
+              { name: 'CSS Styling & Design', weight: 25, desc: 'CSS stylesheet styling and layout properties' },
+              { name: 'JavaScript DOM & Interactivity', weight: 35, desc: 'Active JavaScript logic, event listeners, and DOM mutations' }
             ];
           }
 
@@ -117,186 +115,224 @@ jobs:
             const cssFiles = findFiles(DIR, '.css');
             const jsFiles = findFiles(DIR, '.js');
 
-            let allHtml = htmlFiles.map(f => fs.readFileSync(f, 'utf8')).join('\n\n');
-            let allCss = cssFiles.map(f => fs.readFileSync(f, 'utf8')).join('\n\n');
-            let allJs = jsFiles.map(f => fs.readFileSync(f, 'utf8')).join('\n\n');
-
-            const activeJs = stripComments(allJs);
-            const activeCss = stripComments(allCss);
-
-            let jsSyntaxError = null;
-            if (activeJs.length > 0) {
-              try {
-                new vm.Script(activeJs);
-              } catch (err) {
-                jsSyntaxError = err.message;
-              }
-            }
-
-            const criteria = parseRubricCriteria(payload.rubricText);
-            const totalMax = criteria.reduce((sum, c) => sum + c.weight, 0) || 100;
-
-            if (!allHtml.trim() && !allCss.trim() && !allJs.trim()) {
-              const breakdown = criteria.map(c => ({
-                item: c.name,
-                awarded: 0,
-                max: c.weight,
-                reason: 'Repository is empty or no project files were found.'
-              }));
+            if (htmlFiles.length === 0 && cssFiles.length === 0 && jsFiles.length === 0) {
+              const defaultCriteria = parseRubricCriteria(payload.rubricText);
               fs.writeFileSync('result.json', JSON.stringify({
                 score: 0,
                 feedback: {
-                  summary: 'Evaluation completed: No HTML, CSS, or JavaScript files were found in the repository.',
+                  summary: 'Evaluation completed: Repository contains no HTML, CSS, or JavaScript files.',
                   strengths: [],
-                  issues: ['Repository contains no source code.'],
-                  breakdown: breakdown
+                  issues: ['No source code files found in repository.'],
+                  breakdown: defaultCriteria.map(c => ({ item: c.name, awarded: 0, max: c.weight, reason: 'No files submitted.' }))
                 }
               }));
               return;
             }
 
-            const apiKey = process.env.OPENAI_API_KEY;
-            let aiResult = null;
-
-            if (apiKey) {
+            // 1. Read & Parse HTML
+            let mainHtmlContent = '';
+            let isHtmlClosed = false;
+            let $ = null;
+            if (htmlFiles.length > 0) {
+              mainHtmlContent = fs.readFileSync(htmlFiles[0], 'utf8');
+              isHtmlClosed = mainHtmlContent.includes('</html>') || mainHtmlContent.includes('</body>');
               try {
-                const openai = new OpenAI({
-                  apiKey: apiKey,
-                  baseURL: process.env.OPENAI_BASE_URL || 'https://api.deepseek.com'
-                });
+                $ = cheerio.load(mainHtmlContent);
+              } catch (e) {}
+            }
 
-                const systemPrompt = 'You are an expert, strict code evaluator. You grade student web submissions against the specified assignment rubric.\nCRITICAL RULES:\n1. Grade each rubric criterion individually and award marks between 0 and max weight.\n2. If code required for a criterion is commented out, missing, or purely placeholder, award 0 for that criterion.\n3. If there is a JavaScript syntax error preventing script execution, deduct points from JavaScript functionality criteria accordingly.\n4. Return a strict JSON object: {\"breakdown\": [{\"item\": \"Name\", \"awarded\": 20, \"max\": 20, \"reason\": \"Explanation\"}], \"strengths\": [], \"issues\": [], \"summary\": \"Summary\"}';
+            // 2. Check File Connections (link & script tags)
+            let cssLinked = false;
+            let jsLinked = false;
+            if ($) {
+              $('link[rel=\"stylesheet\"]').each((i, el) => {
+                const href = $(el).attr('href');
+                if (href) {
+                  const resolved = path.join(path.dirname(htmlFiles[0]), href);
+                  if (fs.existsSync(resolved) || cssFiles.some(f => f.endsWith(path.basename(href)))) {
+                    cssLinked = true;
+                  }
+                }
+              });
+              $('script[src]').each((i, el) => {
+                const src = $(el).attr('src');
+                if (src) {
+                  const resolved = path.join(path.dirname(htmlFiles[0]), src);
+                  if (fs.existsSync(resolved) || jsFiles.some(f => f.endsWith(path.basename(src)))) {
+                    jsLinked = true;
+                  }
+                }
+              });
+            }
 
-                const userPrompt = 'RUBRIC CRITERIA:\n' + JSON.stringify(criteria, null, 2) +
-                  '\n\nSTUDENT FILES:\n- HTML: ' + htmlFiles.map(f => path.basename(f)).join(', ') +
-                  '\n- CSS: ' + cssFiles.map(f => path.basename(f)).join(', ') +
-                  '\n- JS: ' + jsFiles.map(f => path.basename(f)).join(', ') +
-                  '\n- JS Syntax: ' + (jsSyntaxError ? ('SYNTAX ERROR: ' + jsSyntaxError) : 'Valid Syntax') +
-                  '\n\nHTML CODE:\n' + allHtml.slice(0, 5000) +
-                  '\n\nACTIVE CSS CODE:\n' + activeCss.slice(0, 3000) +
-                  '\n\nACTIVE JS CODE (uncommented):\n' + activeJs.slice(0, 5000);
+            // 3. Read & Validate CSS
+            let allActiveCss = '';
+            for (const f of cssFiles) {
+              const raw = fs.readFileSync(f, 'utf8');
+              allActiveCss += '\n' + stripComments(raw);
+            }
 
-                const completion = await openai.chat.completions.create({
-                  model: process.env.OPENAI_MODEL || 'deepseek-v4-flash',
-                  temperature: 0,
-                  response_format: { type: 'json_object' },
-                  messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: userPrompt }
-                  ]
-                });
+            // 4. Read & Validate JavaScript across all JS files
+            let allActiveJs = '';
+            let jsSyntaxErrors = [];
+            let hasRawJsCode = false;
 
-                const content = completion.choices?.[0]?.message?.content || '{}';
-                aiResult = JSON.parse(content);
-              } catch (aiErr) {
-                console.error('AI Evaluation error:', aiErr.message);
+            for (const f of jsFiles) {
+              const raw = fs.readFileSync(f, 'utf8');
+              if (raw.trim().length > 0) hasRawJsCode = true;
+              const active = stripComments(raw);
+              if (active.length > 0) {
+                allActiveJs += '\n' + active;
+                try {
+                  new vm.Script(active);
+                } catch (err) {
+                  jsSyntaxErrors.push(path.basename(f) + ': ' + err.message);
+                }
               }
             }
 
-            if (!aiResult || !Array.isArray(aiResult.breakdown) || aiResult.breakdown.length === 0) {
-              const breakdown = [];
-              const strengths = [];
-              const issues = [];
-              let earnedTotal = 0;
+            const isJsValid = jsSyntaxErrors.length === 0 && allActiveJs.length > 0;
+            const hasEventHandling = allActiveJs.includes('addEventListener') || allActiveJs.includes('onclick') || allActiveJs.includes('.on');
+            const hasDomMutation = allActiveJs.includes('innerText') || allActiveJs.includes('innerHTML') || allActiveJs.includes('textContent') || allActiveJs.includes('value') || allActiveJs.includes('classList');
 
-              for (const c of criteria) {
-                const desc = (c.desc || c.name || '').toLowerCase();
-                let awarded = 0;
-                let reason = '';
+            // 5. Evaluate Rubric Criteria Deterministically
+            const criteria = parseRubricCriteria(payload.rubricText);
+            const totalMax = criteria.reduce((sum, c) => sum + c.weight, 0) || 100;
+            let earnedScore = 0;
+            const breakdown = [];
+            const strengths = [];
+            const issues = [];
 
-                if (desc.includes('html') || desc.includes('structure') || desc.includes('layout') || desc.includes('markup')) {
-                  if (allHtml.length > 50 && allHtml.includes('<') && allHtml.includes('>')) {
-                    awarded = c.weight;
-                    reason = 'HTML structure present with standard markup tags.';
-                  } else {
-                    reason = 'HTML structure is missing or empty.';
-                  }
-                } else if (desc.includes('css') || desc.includes('style') || desc.includes('design') || desc.includes('responsive')) {
-                  if (activeCss.length > 30) {
-                    awarded = c.weight;
-                    reason = 'Active CSS stylesheet styling implemented.';
-                  } else {
-                    reason = 'CSS styling is missing or empty.';
-                  }
-                } else if (desc.includes('js') || desc.includes('javascript') || desc.includes('logic') || desc.includes('function') || desc.includes('interactivity')) {
-                  if (jsSyntaxError) {
-                    awarded = 0;
-                    reason = 'JavaScript syntax error: ' + jsSyntaxError;
-                  } else if (activeJs.length > 40) {
-                    awarded = c.weight;
-                    reason = 'Active JavaScript logic implemented without syntax errors.';
-                  } else {
-                    awarded = 0;
-                    reason = 'JavaScript file is empty or contains only commented-out code.';
-                  }
+            for (const c of criteria) {
+              const d = c.desc;
+              let awarded = 0;
+              let reason = '';
+
+              // A. Linking / File Connection Criterion
+              if (d.includes('link') || d.includes('connect') || d.includes('structure') && d.includes('project')) {
+                if (cssLinked && (jsLinked || jsFiles.length === 0)) {
+                  awarded = c.weight;
+                  reason = 'Stylesheet and script files are properly linked in HTML and exist in the repository.';
+                } else if (cssLinked || jsLinked) {
+                  awarded = Math.round(c.weight * 0.5);
+                  reason = 'Partial file connection: either CSS or JS link is missing or pointing to a non-existent file.';
                 } else {
-                  const words = desc.split(/\\s+/).filter(w => w.length > 3);
-                  const matches = words.filter(w => allHtml.toLowerCase().includes(w) || activeJs.toLowerCase().includes(w));
-                  if (matches.length > 0 && !jsSyntaxError) {
-                    awarded = c.weight;
-                    reason = 'Implemented required elements for ' + c.name + '.';
-                  } else if (jsSyntaxError) {
-                    awarded = 0;
-                    reason = 'JavaScript syntax error prevented execution: ' + jsSyntaxError;
-                  } else {
-                    awarded = 0;
-                    reason = 'Requirement ' + c.name + ' missing in active source code.';
-                  }
+                  awarded = 0;
+                  reason = 'Stylesheet (<link>) and Script (<script>) are not linked or point to missing files.';
                 }
-
-                earnedTotal += awarded;
-                breakdown.push({ item: c.name, awarded: awarded, max: c.weight, reason: reason });
-                if (awarded === c.weight) {
-                  strengths.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
+              }
+              // B. HTML Structure & Markup Criterion
+              else if (d.includes('html') || d.includes('structure') || d.includes('layout') && !d.includes('css')) {
+                if ($ && isHtmlClosed && mainHtmlContent.length > 80 && ($('body').children().length > 0)) {
+                  awarded = c.weight;
+                  reason = 'Well-structured HTML with properly closed semantic tags and containers.';
+                } else if ($ && mainHtmlContent.length > 40) {
+                  awarded = Math.round(c.weight * 0.3);
+                  reason = 'Incomplete HTML structure (tags unclosed or missing elements).';
                 } else {
-                  issues.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
+                  awarded = 0;
+                  reason = 'HTML file is missing, empty, or unparseable.';
+                }
+              }
+              // C. CSS Styling & Design Criterion
+              else if (d.includes('css') || d.includes('style') || d.includes('design') || d.includes('responsive')) {
+                if (allActiveCss.length > 60 && (allActiveCss.includes('{') && allActiveCss.includes('}'))) {
+                  awarded = c.weight;
+                  reason = 'Active CSS rules, styling properties, and visual layout implemented.';
+                } else if (allActiveCss.length > 20) {
+                  awarded = Math.round(c.weight * 0.4);
+                  reason = 'Minimal CSS styling provided.';
+                } else {
+                  awarded = 0;
+                  reason = 'CSS stylesheet is empty or missing active styles.';
+                }
+              }
+              // D. General JS / DOM Functionality Criterion
+              else if (d.includes('js') || d.includes('javascript') || d.includes('function') || d.includes('logic') || d.includes('dom')) {
+                if (jsSyntaxErrors.length > 0) {
+                  awarded = 0;
+                  reason = 'JavaScript syntax error prevented execution: ' + jsSyntaxErrors.join(', ');
+                } else if (!hasRawJsCode || (hasRawJsCode && allActiveJs.length === 0)) {
+                  awarded = 0;
+                  reason = 'JavaScript code is completely commented out or empty.';
+                } else if (isJsValid && hasDomMutation) {
+                  awarded = c.weight;
+                  reason = 'Active JavaScript logic, event handling, and DOM manipulation verified without errors.';
+                } else if (isJsValid) {
+                  awarded = Math.round(c.weight * 0.6);
+                  reason = 'JavaScript syntax is valid but lacks active DOM updates.';
+                } else {
+                  awarded = 0;
+                  reason = 'JavaScript logic is incomplete or missing.';
+                }
+              }
+              // E. Specific Feature / Interactivity Criterion (e.g. clock, toggle, counter, lock, input, etc.)
+              else {
+                if (jsSyntaxErrors.length > 0) {
+                  awarded = 0;
+                  reason = 'JavaScript syntax error in script: ' + jsSyntaxErrors.join(', ');
+                } else if (allActiveJs.length === 0) {
+                  awarded = 0;
+                  reason = 'Required functional logic is missing or commented out in JavaScript.';
+                } else {
+                  const keywords = d.split(/\\s+/).filter(w => w.length > 3 && !['with', 'from', 'that', 'this', 'have', 'been'].includes(w));
+                  const foundInDom = $ && keywords.some(k => mainHtmlContent.toLowerCase().includes(k));
+                  const foundInJs = keywords.some(k => allActiveJs.toLowerCase().includes(k));
+
+                  if (foundInDom && foundInJs && hasDomMutation) {
+                    awarded = c.weight;
+                    reason = 'Feature elements found in HTML and functional logic implemented in JavaScript.';
+                  } else if (foundInJs) {
+                    awarded = Math.round(c.weight * 0.7);
+                    reason = 'Feature logic found in JavaScript code.';
+                  } else if (foundInDom) {
+                    awarded = Math.round(c.weight * 0.4);
+                    reason = 'UI elements present in HTML, but active JavaScript logic is missing.';
+                  } else {
+                    awarded = 0;
+                    reason = 'Requirement not found in active HTML or JavaScript code.';
+                  }
                 }
               }
 
-              const score = Math.round((earnedTotal / totalMax) * 100);
-              aiResult = {
-                score: score,
-                breakdown: breakdown,
-                strengths: strengths,
-                issues: issues,
-                summary: score >= 80 ? 'Great job! All core rubric criteria have been satisfied.' : ('Submission scored ' + score + '/100. Review the issues above for required fixes.')
-              };
+              earnedScore += awarded;
+              breakdown.push({ item: c.name, awarded: awarded, max: c.weight, reason: reason });
+              if (awarded === c.weight) {
+                strengths.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
+              } else {
+                issues.push('[' + c.name + '] ' + reason + ' (earned ' + awarded + '/' + c.weight + ' marks)');
+              }
             }
 
-            let earnedSum = 0;
-            let maxSum = 0;
-            const finalBreakdown = (aiResult.breakdown || []).map(b => {
-              const maxPts = Number(b.max) || 20;
-              const awardedPts = Math.min(Math.max(Number(b.awarded) || 0, 0), maxPts);
-              earnedSum += awardedPts;
-              maxSum += maxPts;
-              return {
-                item: b.item || 'Criterion',
-                awarded: awardedPts,
-                max: maxPts,
-                reason: b.reason || ''
-              };
-            });
-
-            const finalCalculatedScore = maxSum > 0 ? Math.round((earnedSum / maxSum) * 100) : (aiResult.score || 0);
+            const finalScore = Math.round((earnedScore / totalMax) * 100);
+            let summary = '';
+            if (finalScore === 100) {
+              summary = 'Outstanding! All HTML structure, CSS styling, file links, and JavaScript DOM requirements are fully satisfied.';
+            } else if (finalScore >= 60) {
+              summary = 'Good effort. Your project meets core requirements with a score of ' + finalScore + '/100, but has minor missing elements or broken links.';
+            } else if (finalScore > 0) {
+              summary = 'Evaluation score: ' + finalScore + '/100. Several required features, active JavaScript functions, or HTML elements are missing.';
+            } else {
+              summary = 'Evaluation score: 0/100. Code is either completely commented out, has fatal syntax errors, or missing required files.';
+            }
 
             fs.writeFileSync('result.json', JSON.stringify({
-              score: finalCalculatedScore,
+              score: finalScore,
               feedback: {
-                summary: aiResult.summary || ('Evaluation completed with score ' + finalCalculatedScore + '/100.'),
-                strengths: aiResult.strengths || [],
-                issues: aiResult.issues || [],
-                breakdown: finalBreakdown
+                summary: summary,
+                strengths: strengths,
+                issues: issues,
+                breakdown: breakdown
               }
             }));
           }
 
           evaluate().catch(err => {
-            console.error('Evaluation runtime failure:', err);
+            console.error('Fatal evaluation runtime error:', err);
             fs.writeFileSync('result.json', JSON.stringify({
               score: 0,
               feedback: {
-                summary: 'Evaluation encountered a fatal execution error.',
+                summary: 'Evaluation encountered a fatal runtime error.',
                 strengths: [],
                 issues: [err.message],
                 breakdown: []
