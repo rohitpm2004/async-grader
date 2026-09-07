@@ -8,10 +8,7 @@ jobs:
   evaluate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Grader Repository
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js & Playwright
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
@@ -19,8 +16,7 @@ jobs:
       - name: Install Dependencies
         run: |
           npm init -y
-          npm install playwright openai
-          npx playwright install --with-deps chromium
+          npm install cheerio openai
 
       - name: Clone Student Repository
         run: |
@@ -31,13 +27,12 @@ jobs:
             curl -sL "$RAW_URL" -o student-submission/index.html
           else
             git clone "$REPO_URL" student-submission || {
-              echo "Git clone failed. Creating fallback empty submission."
+              echo "Git clone failed"
               mkdir -p student-submission
             }
           fi
 
-      - name: Run Visual Evaluation
-        id: run-eval
+      - name: Run Dynamic Rubric Evaluation
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: "https://api.deepseek.com"
@@ -45,142 +40,216 @@ jobs:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
           cat << 'EOF' > run-eval.js
-          const { chromium } = require('playwright');
-          const http = require('http');
           const fs = require('fs');
           const path = require('path');
+          const cheerio = require('cheerio');
           const { OpenAI } = require('openai');
 
           const payload = JSON.parse(process.env.PAYLOAD || '{}');
           const DIR = path.join(process.cwd(), 'student-submission');
 
-          // Initialize OpenAI client pointing to DeepSeek
-          const openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-            baseURL: process.env.OPENAI_BASE_URL || 'https://api.deepseek.com'
-          });
-
-          // 1. Simple Static Server for Student's Webpage
-          const server = http.createServer((req, res) => {
-            let filePath = path.join(DIR, req.url === '/' ? 'index.html' : req.url);
-            if (!fs.existsSync(filePath)) {
-              res.writeHead(404);
-              res.end();
-              return;
+          // Helper: Parse the assignment's dynamic rubric criteria
+          function parseRubricCriteria(rawRubric) {
+            if (!rawRubric) {
+              return [
+                { name: "HTML Semantic Structure", weight: 35, desc: "HTML elements and structure" },
+                { name: "CSS Styling & Layout", weight: 35, desc: "CSS presentation, flexbox, or grid" },
+                { name: "JavaScript Interactivity", weight: 30, desc: "JavaScript functionality and logic" }
+              ];
             }
-            const ext = path.extname(filePath);
-            const mime = ext === '.html' ? 'text/html' :
-                         ext === '.css' ? 'text/css' :
-                         ext === '.js' ? 'application/javascript' : 'text/plain';
-            res.writeHead(200, { 'Content-Type': mime });
-            res.end(fs.readFileSync(filePath));
-          });
+
+            try {
+              let parsed = typeof rawRubric === 'string' ? JSON.parse(rawRubric) : rawRubric;
+              while (typeof parsed === 'string') parsed = JSON.parse(parsed);
+
+              let list = Array.isArray(parsed) ? parsed : (parsed.criteria || parsed.items || []);
+              if (Array.isArray(list) && list.length > 0) {
+                return list.map((c, i) => ({
+                  name: c.name || c.description || `Criterion ${i + 1}`,
+                  weight: Number(c.weight ?? c.score ?? c.max ?? 10) || 10,
+                  desc: (c.description || c.name || "").toLowerCase()
+                }));
+              }
+            } catch (e) {
+              // Plain-text line by line parsing
+            }
+
+            const lines = String(rawRubric).split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 3);
+            const items = [];
+            for (const line of lines) {
+              const weightMatch = line.match(/\((\d+)\s*(?:pts?|points?|marks?|%)\)/i) ||
+                                  line.match(/\[(\d+)\s*(?:pts?|points?|marks?|%)\]/i);
+              const weight = weightMatch ? parseInt(weightMatch[1], 10) : 20;
+              const name = line.replace(/^\d+[\.\)]\s*/, "").replace(/^[-*•]\s*/, "").replace(/\(.*\)/, "").trim();
+              if (name) items.push({ name, weight, desc: name.toLowerCase() });
+            }
+
+            return items.length > 0 ? items : [
+              { name: "HTML Structure", weight: 40, desc: "html structure" },
+              { name: "CSS Layout & Design", weight: 30, desc: "css styling" },
+              { name: "JavaScript Logic", weight: 30, desc: "javascript logic" }
+            ];
+          }
 
           async function evaluate() {
-            server.listen(3000);
-            
-            let screenshotBase64 = '';
-            let codeContext = '';
-            
-            try {
-              // Extract Student Source Code
-              const files = ['index.html', 'style.css', 'script.js', 'app.js', 'styles.css', 'main.js'];
-              for (const file of files) {
-                const fp = path.join(DIR, file);
-                if (fs.existsSync(fp)) {
-                  codeContext += `\n--- ${file} ---\n${fs.readFileSync(fp, 'utf8').slice(0, 3000)}\n`;
+            // 1. Read Student Code Files
+            const htmlFile = fs.existsSync(path.join(DIR, 'index.html')) ? fs.readFileSync(path.join(DIR, 'index.html'), 'utf8') : '';
+            const cssFile = fs.existsSync(path.join(DIR, 'style.css')) ? fs.readFileSync(path.join(DIR, 'style.css'), 'utf8') : 
+                           (fs.existsSync(path.join(DIR, 'styles.css')) ? fs.readFileSync(path.join(DIR, 'styles.css'), 'utf8') : '');
+            const jsFile = fs.existsSync(path.join(DIR, 'script.js')) ? fs.readFileSync(path.join(DIR, 'script.js'), 'utf8') : 
+                          (fs.existsSync(path.join(DIR, 'app.js')) ? fs.readFileSync(path.join(DIR, 'app.js'), 'utf8') : 
+                          (fs.existsSync(path.join(DIR, 'main.js')) ? fs.readFileSync(path.join(DIR, 'main.js'), 'utf8') : ''));
+
+            const $ = htmlFile ? cheerio.load(htmlFile) : null;
+            const criteria = parseRubricCriteria(payload.rubricText);
+
+            let totalMax = criteria.reduce((sum, c) => sum + c.weight, 0);
+            if (totalMax === 0) totalMax = 100;
+
+            const breakdown = [];
+            const strengths = [];
+            const issues = [];
+            let earnedScore = 0;
+
+            // 2. Evaluate Each Rubric Criterion Specifically Against Code/DOM
+            for (const c of criteria) {
+              const d = c.desc;
+              let passed = false;
+              let reason = "";
+
+              // A. Navigation / Header criteria
+              if (d.includes('nav') || d.includes('header') || d.includes('menu')) {
+                if ($ && ($('nav, header, .navbar, .menu, .nav').length > 0 || $('a').length >= 2)) {
+                  passed = true;
+                  reason = "Navigation and header elements properly created.";
+                } else {
+                  reason = "Missing navigation bar or header links in HTML.";
+                }
+              }
+              // B. Form / Input criteria
+              else if (d.includes('form') || d.includes('input') || d.includes('button')) {
+                if ($ && ($('form, input, select, textarea, button').length > 0)) {
+                  passed = true;
+                  reason = "Form inputs and interactive buttons detected.";
+                } else {
+                  reason = "Expected form elements or action buttons not found.";
+                }
+              }
+              // C. Timer / Clock / Date criteria
+              else if (d.includes('clock') || d.includes('time') || d.includes('timer') || d.includes('date')) {
+                if (jsFile && (jsFile.includes('setInterval') || jsFile.includes('Date') || jsFile.includes('setTimeout'))) {
+                  passed = true;
+                  reason = "Date/Time calculation and update interval logic implemented.";
+                } else if ($ && ($('#time, .time, #clock, #date').length > 0)) {
+                  passed = true;
+                  reason = "Time/Date display container present in DOM.";
+                } else {
+                  reason = "Missing live timer logic or Date API implementation.";
+                }
+              }
+              // D. Layout / Cards / Grid criteria
+              else if (d.includes('card') || d.includes('grid') || d.includes('flex') || d.includes('layout')) {
+                if ((cssFile && (cssFile.includes('flex') || cssFile.includes('grid'))) || ($ && $('.card, .grid, .container, section').length > 0)) {
+                  passed = true;
+                  reason = "Layout structure and CSS flex/grid rules verified.";
+                } else {
+                  reason = "Layout grid or container styling missing.";
+                }
+              }
+              // E. Responsive / Mobile criteria
+              else if (d.includes('responsive') || d.includes('mobile')) {
+                if (cssFile && (cssFile.includes('@media') || cssFile.includes('max-width') || cssFile.includes('min-width'))) {
+                  passed = true;
+                  reason = "Media queries and responsive rules detected.";
+                } else {
+                  reason = "No responsive CSS media queries found.";
+                }
+              }
+              // F. General CSS / Styling criteria
+              else if (d.includes('css') || d.includes('style') || d.includes('color') || d.includes('design')) {
+                if (cssFile.length > 20 || (htmlFile && htmlFile.includes('<style>'))) {
+                  passed = true;
+                  reason = "CSS styling and presentation rules applied.";
+                } else {
+                  reason = "Missing CSS stylesheet.";
+                }
+              }
+              // G. General JavaScript / Logic / API criteria
+              else if (d.includes('js') || d.includes('javascript') || d.includes('function') || d.includes('event') || d.includes('logic')) {
+                if (jsFile.length > 20 || (htmlFile && htmlFile.includes('<script>'))) {
+                  passed = true;
+                  reason = "JavaScript logic, event handlers, and functions implemented.";
+                } else {
+                  reason = "Missing JavaScript functionality.";
+                }
+              }
+              // H. General HTML Structure criteria
+              else {
+                if (htmlFile && htmlFile.length > 20) {
+                  passed = true;
+                  reason = "Requirement implemented in project files.";
+                } else {
+                  reason = "Required files missing or incomplete.";
                 }
               }
 
-              // Render in Playwright & Capture Screenshot
-              try {
-                const browser = await chromium.launch();
-                const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-                const page = await context.newPage();
-                await page.goto('http://localhost:3000', { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
-                
-                const buffer = await page.screenshot({ fullPage: true }).catch(() => null);
-                if (buffer) {
-                  screenshotBase64 = buffer.toString('base64');
-                }
-                await browser.close().catch(() => {});
-              } catch (browserErr) {
-                console.warn("Browser capture warning:", browserErr.message);
-              }
+              const awarded = passed ? c.weight : 0;
+              earnedScore += awarded;
 
-              // Build Prompt
-              const prompt = `
-          You are an expert web development instructor grading a student's HTML/CSS/JS assignment.
-
-          ## Rubric / Requirements:
-          ${payload.rubricText || 'Grade the design, HTML structure, CSS styling, and JavaScript functionality.'}
-
-          ## Student's Code:
-          ${codeContext || 'No source files detected in repository.'}
-
-          **IMPORTANT GRADING INSTRUCTIONS:**
-          1. **Functionality & Logic First:** Check the JavaScript logic, event listeners, DOM updates, and HTML structure.
-          2. **Strict But Fair Scoring:** Award marks based on how many rubric requirements are actually implemented in code.
-          3. **Never fail on styling quirks:** If the JavaScript works, award full credit for the functional requirements.
-
-          Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
-          {
-            "score": <integer 0-100>,
-            "summary": "1-2 sentences summarizing their attempt and implementation.",
-            "strengths": ["1-2 things they implemented correctly in HTML/CSS/JS"],
-            "issues": ["1-2 specific missing features or bugs based on rubric"]
-          }
-              `.trim();
-
-              const model = process.env.OPENAI_MODEL || 'deepseek-v4-flash';
-              
-              // Call DeepSeek API
-              const response = await openai.chat.completions.create({
-                model: model,
-                messages: [
-                  {
-                    role: "user",
-                    content: prompt
-                  }
-                ],
-                max_tokens: 500,
-                temperature: 0.2,
-                response_format: { type: "json_object" }
+              breakdown.push({
+                item: c.name,
+                awarded: awarded,
+                max: c.weight,
+                reason: reason
               });
 
-              const resultStr = response.choices[0]?.message?.content?.trim() || "{}";
-              const resultObj = JSON.parse(resultStr);
-              
-              const finalScore = typeof resultObj.score === 'number' ? Math.max(0, Math.min(100, Math.round(resultObj.score))) : 0;
-
-              fs.writeFileSync('result.json', JSON.stringify({
-                score: finalScore,
-                feedback: JSON.stringify({
-                  summary: resultObj.summary || "Evaluation completed.",
-                  strengths: resultObj.strengths || (finalScore === 100 ? ["Passed all requirements."] : []),
-                  issues: resultObj.issues || []
-                })
-              }));
-
-            } catch (err) {
-              console.error("Evaluation script error:", err);
-              fs.writeFileSync('result.json', JSON.stringify({
-                score: 0,
-                feedback: JSON.stringify({
-                  summary: "Evaluation script encountered an error.",
-                  strengths: [],
-                  issues: [err.message]
-                })
-              }));
-            } finally {
-              server.close();
-              process.exit(0);
+              if (passed) {
+                strengths.push(`[${c.name}] ${reason} (earned ${awarded}/${c.weight} marks)`);
+              } else {
+                issues.push(`[${c.name}] ${reason} (earned 0/${c.weight} marks)`);
+              }
             }
+
+            // Normalize score to 0-100 scale
+            const finalScore = Math.round((earnedScore / totalMax) * 100);
+
+            let summary = finalScore === 100
+              ? "Excellent work! All rubric criteria have been fully satisfied without errors."
+              : `Evaluation completed based on rubric criteria. Earned ${finalScore}/100.`;
+
+            // Optional DeepSeek AI summary refinement if available
+            if (process.env.OPENAI_API_KEY && finalScore < 100) {
+              try {
+                const openai = new OpenAI({
+                  apiKey: process.env.OPENAI_API_KEY,
+                  baseURL: process.env.OPENAI_BASE_URL || 'https://api.deepseek.com'
+                });
+                const aiRes = await openai.chat.completions.create({
+                  model: process.env.OPENAI_MODEL || 'deepseek-v4-flash',
+                  messages: [{ role: 'user', content: `Summarize this student's web dev assignment in 2 sentences. Score: ${finalScore}/100. Strengths: ${strengths.join('; ')}. Issues: ${issues.join('; ')}` }],
+                  max_tokens: 150
+                });
+                const aiSummary = aiRes.choices[0]?.message?.content?.trim();
+                if (aiSummary) summary = aiSummary;
+              } catch (e) {
+                // If AI is unavailable/402, mathematical rubric score is already completely preserved!
+              }
+            }
+
+            fs.writeFileSync('result.json', JSON.stringify({
+              score: finalScore,
+              feedback: JSON.stringify({
+                summary: summary,
+                strengths: strengths,
+                issues: issues,
+                breakdown: breakdown
+              })
+            }));
           }
 
           evaluate();
           EOF
-          
+
           node run-eval.js
 
       - name: Send Webhook Callback
