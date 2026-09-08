@@ -66,32 +66,58 @@ jobs:
             }
           }
 
-          if (errors.length > 0) {
-            fs.writeFileSync('report.txt', 'Syntax Error: \n' + errors.join('\n'));
-          } else {
-            fs.writeFileSync('report.txt', 'Syntax Check: Passed. No JavaScript compilation errors.');
+          // Check inline <script> tags inside HTML files if no external JS exists
+          const htmlFiles = findFiles(DIR, '.html');
+          for (const h of htmlFiles) {
+            try {
+              const content = fs.readFileSync(h, 'utf8');
+              const scriptMatches = content.match(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/gi) || [];
+              for (let i = 0; i < scriptMatches.length; i++) {
+                const code = scriptMatches[i].replace(/<\/?script[^>]*>/gi, '');
+                if (code.trim()) {
+                  try {
+                    new vm.Script(code);
+                  } catch (e) {
+                    errors.push(`${path.basename(h)} (inline script ${i + 1}): ${e.message}`);
+                  }
+                }
+              }
+            } catch (e) {}
           }
+
+          let reportContent = '';
+          if (errors.length > 0) {
+            reportContent = 'Syntax Error:\n' + errors.join('\n') + '\n';
+          } else {
+            reportContent = 'Syntax Check: Passed. No JavaScript compilation errors.\n';
+          }
+
+          fs.writeFileSync('report.txt', reportContent, 'utf8');
+          console.log(reportContent);
           EOF
           node run-syntax.js
-          
-          # Read the report into an environment variable
-          {
-            echo 'REPORT<<EOF'
-            cat report.txt
-            echo EOF
-          } >> "$GITHUB_ENV"
 
       - name: Send Webhook Callback
         if: always()
         run: |
           node -e '
+            const fs = require("fs");
             const https = require("https");
             const http = require("http");
+
+            let testOutput = "Syntax Check: Passed.";
+            try {
+              if (fs.existsSync("report.txt")) {
+                testOutput = fs.readFileSync("report.txt", "utf8").trim();
+              }
+            } catch (e) {
+              testOutput = "Syntax check report missing.";
+            }
 
             const payloadData = {
               jobId: "${{ github.event.client_payload.jobId }}",
               status: "completed",
-              testOutput: process.env.REPORT || "Syntax Check: Passed."
+              testOutput: testOutput
             };
 
             const data = JSON.stringify(payloadData);
@@ -123,4 +149,3 @@ jobs:
             req.write(data);
             req.end();
           '
-
